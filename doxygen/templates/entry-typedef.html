@@ -1,0 +1,12 @@
+            {% if typedef.is_using %}
+            <dt>
+              {% if typedef.templates != None %}
+              {% set j = joiner(', ') %}
+              <div class="m-dox-template">template&lt;{% for t in typedef.templates %}{{ j() }}{{ t.type }}{% if t.name %} {{ t.name }}{% endif %}{% if t.default %} = {{ t.default }}{% endif%}{% endfor %}&gt;</div>
+              {% endif %}
+              using <a href="#{{ typedef.id }}" {% if typedef.has_details %}class="m-dox"{% else %}class="m-dox-self" name="{{ typedef.id }}"{% endif %}>{{ typedef.name }}</a> = {{ typedef.type }}
+            </dt>
+            {% else %}
+            <dt>typedef {{ typedef.type }} <a href="#{{ typedef.id }}" {% if typedef.has_details %}class="m-dox"{% else %}class="m-dox-self" name="{{ typedef.id }}"{% endif %}>{{ typedef.name }}</a></dt>
+            {% endif %}
+            <dd>{{ typedef.brief }}</dd>

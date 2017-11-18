@@ -1,0 +1,10 @@
+          <section class="m-dox-details" id="{{ define.id }}"><div>
+            <h3>
+              {% set j = joiner(',\n              ') %}
+              #define <span class="m-dox-wrap"><a href="#{{ define.id }}" class="m-dox-self">{{ define.name }}</a>{% if define.params != None %}(<span class="m-dox-wrap">{% for param in define.params %}{{ j() }}{{ param[0] }}{% endfor %}){% endif %}</span>
+            </h3>
+            {% if define.brief %}
+            <p>{{ define.brief }}</p>
+            {% endif %}
+{{ define.description }}
+          </div></section>

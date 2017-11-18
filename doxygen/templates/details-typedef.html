@@ -1,0 +1,25 @@
+          <section class="m-dox-details" id="{{ typedef.id }}"><div>
+            {% if typedef.is_using %}
+            <h3>
+              {% if compound.templates != None or typedef.templates != None %}
+              <div class="m-dox-template">
+                {% if compound.templates != None %}
+                {% set j = joiner(', ') %}
+                template&lt;{% for t in compound.templates %}{{ j() }}{{ t.type }}{% if t.name %} {{ t.name }}{% endif %}{% endfor %}&gt;
+                {% endif %}
+                {% if typedef.templates != None %}
+                {% set j = joiner(', ') %}
+                template&lt;{% for t in typedef.templates %}{{ j() }}{{ t.type }}{% if t.name %} {{ t.name }}{% endif %}{% if t.default %} = {{ t.default }}{% endif %}{% endfor %}&gt;
+                {% endif %}
+              </div>
+              {% endif %}
+              using <a href="#{{ typedef.id }}" class="m-dox-self">{{ prefix }}{{ typedef.name }}</a> = {{ typedef.type }}{% if typedef.is_protected %} <span class="m-label m-warning">protected</span>{% endif %}
+            </h3>
+            {% else %}
+            <h3>typedef {{ typedef.type }} <a href="#{{ typedef.id }}" class="m-dox-self">{{ prefix }}{{ typedef.name }}</a>{% if typedef.is_protected %} <span class="m-label m-warning">protected</span>{% endif %}</h3>
+            {% endif %}
+            {% if typedef.brief %}
+            <p>{{ typedef.brief }}</p>
+            {% endif %}
+{{ typedef.description }}
+          </div></section>

@@ -1,0 +1,28 @@
+          <section class="m-dox-details" id="{{ enum.id }}"><div>
+            <h3>
+              {% if compound.templates != None %}
+              <div class="m-dox-template">
+                {% set j = joiner(', ') %}
+                template&lt;{% for t in compound.templates %}{{ j() }}{{ t.type }}{% if t.name %} {{ t.name }}{% endif %}{% endfor %}&gt;
+              </div>
+              {% endif %}
+              enum {% if enum.is_strong %}class {% endif %}<a href="#{{ enum.id }}" class="m-dox-self">{{ prefix }}{{ enum.name }}</a>{% if enum.type %}: {{ enum.type }}{% endif %}{% if enum.is_protected %} <span class="m-label m-warning">protected</span>{% endif %}
+            </h3>
+            <p>{{ enum.brief }}</p>
+{{ enum.description }}
+            {% if enum.values %}
+            <table class="m-table m-fullwidth m-flat m-dox">
+              <thead><tr><th style="width: 1%">Enumerators</th><th></th></tr></thead>
+              <tbody>
+                {% for value in enum.values %}
+                <tr>
+                  <td><a href="#{{ value.id }}" class="m-dox-self" name="{{ value.id }}">{{ value.name }}</a></td>
+                  <td>
+{{ value.description }}
+                  </td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+            {% endif %}
+          </div></section>

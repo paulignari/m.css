@@ -1,0 +1,15 @@
+          <section class="m-dox-details" id="{{ var.id }}"><div>
+            <h3>
+              {% if compound.templates != None %}
+              <div class="m-dox-template">
+                {% set j = joiner(', ') %}
+                template&lt;{% for t in compound.templates %}{{ j() }}{{ t.type }}{% if t.name %} {{ t.name }}{% endif %}{% endfor %}&gt;
+              </div>
+              {% endif %}
+              {% if var.is_static %}static {% endif %}{{ var.type }} <a href="#{{ var.id }}" class="m-dox-self">{{ prefix }}{{ var.name }}</a>{% if var.is_protected %} <span class="m-label m-warning">protected</span>{% endif %}{% if var.is_constexpr %} <span class="m-label m-primary">constexpr</span>{% endif %}
+            </h3>
+            {% if var.brief %}
+            <p>{{ var.brief }}</p>
+            {% endif %}
+{{ var.description }}
+          </div></section>
