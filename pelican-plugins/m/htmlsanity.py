@@ -230,7 +230,7 @@ class SaneHtmlTranslator(HTMLTranslator):
                           ord('"'): '&quot;',
                           ord('>'): '&gt;',
                           ord('@'): '&#64;', # may thwart address harvesters
-                          ord('\u00AD'): '&shy;'}
+                          }
 
     def __init__(self, document):
         HTMLTranslator.__init__(self, document)
