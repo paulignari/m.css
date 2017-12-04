@@ -5,7 +5,14 @@
       {{ month }} <span class="m-date-day">{{ day }}</span> {{year}}
     </time>
     {{ article.title }}
-  </a></h1>
+  </a>
+  {% if article.translations %}<nav class="m-translations"><!-- Read in: -->
+    {% for translation in article.translations %}
+        <li class="m-translations-lang"><a href="{{ SITEURL }}/{{ translation.url }}">{{ translation.lang }}</a></li>
+    {% endfor %}
+    </nav>
+  {% endif %}
+  </h1>
   {# Display summary only if:
     - we're on article listing page (either the articles_page is defined by
       Pelican the article_list is defined by our archive/index page and the
