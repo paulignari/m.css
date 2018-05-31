@@ -1,7 +1,7 @@
 #
 #   This file is part of m.css.
 #
-#   Copyright © 2017 Vladimír Vondruš <mosra@centrum.cz>
+#   Copyright © 2017, 2018 Vladimír Vondruš <mosra@centrum.cz>
 #
 #   Permission is hereby granted, free of charge, to any person obtaining a
 #   copy of this software and associated documentation files (the "Software"),
@@ -42,3 +42,11 @@ class Math(PluginTestCase):
         })
 
         self.assertEqual(*self.actual_expected_contents('page.html'))
+
+    def test_code_fallback(self):
+        self.run_pelican({
+            'PLUGINS': ['m.htmlsanity', 'm.math'],
+            'M_MATH_RENDER_AS_CODE': True
+        })
+
+        self.assertEqual(*self.actual_expected_contents('page.html', 'page-code-fallback.html'))

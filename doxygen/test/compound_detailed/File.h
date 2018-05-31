@@ -91,6 +91,7 @@ And we have some detailed docs as well.
 */
 namespace Namee {}
 
+/** @brief A namespace */
 namespace Foo {
 
 /**
@@ -99,11 +100,14 @@ namespace Foo {
 @param a        That's a for you
 @param b        Well, a string
 @param things   And an array!
+@param stuff    Another array
 @return It returns!
+@retval 0       Zero?
+@retval 42      The Answer.
 
 Ooooh, more text!
 */
-template<class T> int foo(int a, std::string b, char(&things)[5], bool, char(&)[42]);
+template<class T> int foo(int a, std::string b, char(&things)[5], bool, char(&)[42], int stuff[], double[1337]);
 
 /**
 @brief Input and output
@@ -119,8 +123,57 @@ constexpr void bar(int in, int& out, void* shit) noexcept;
 */
 int justReturn();
 
+/**
+@brief Function
+@retval 42 With just return value docs should still have detailed section
+*/
+int justReturnValues();
+
+/**
+@brief Function
+@exception std::bad_exception With just exception docs should still have detailed section
+*/
+int justExceptions();
+
+/**
+@brief A function with scattered docs
+
+@param a    First parameter docs
+
+@tparam B   Second template parameter docs
+
+This is a function that has the docs all scattered around. They should get
+merged and reordered.
+
+@tparam A   First template parameter docs
+
+@param b    Second parameter docs
+
+That goes also for the return values.
+
+@retval 0       Zero
+
+Yes?
+
+ - We also need to
+ - extract them out of a list
+@retval 1337    1337 h4xx0r?!
+@retval 42      The answer. To everything
+
+@exception std::bad_function_call if you call the function bad
+@exception std::future_error if you are from the future
+*/
+template<class A, class B> int bar(int a, int b);
+
+/**
+@brief Function with one description for all params
+@param x, y, z Coordinates in 3D space
+*/
+void thisIsAShittyWayToPassAVectorButWhatever(float x, float y, float z);
+
 }
 
+/** @brief A namespace */
 namespace Eno {
 
 /** @brief Boolean */
@@ -137,6 +190,7 @@ enum {
 
 }
 
+/** @brief A namespace */
 namespace Type {
 
 /**
@@ -155,6 +209,7 @@ typedef void(*Func)(int, std::string&);
 
 }
 
+/** @brief A namespace */
 namespace Var {
 
 /**
@@ -166,6 +221,7 @@ constexpr const int a = 25;
 
 }
 
+/** @brief A namespace */
 namespace Warning {
 
 /** @brief Use the brief! */
@@ -177,6 +233,12 @@ enum Enum {
 /**
 @brief Wrong
 @param wrong This parameter is not here
+@return Returns nothing.
+@return Returns nothing, but second time. This is ignored.
+
+Function details.
+
+@return Returns nothing, third time, in a different paragraph. Ignored as well.
 */
 void bar();
 

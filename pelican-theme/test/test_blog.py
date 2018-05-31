@@ -1,7 +1,7 @@
 #
 #   This file is part of m.css.
 #
-#   Copyright © 2017 Vladimír Vondruš <mosra@centrum.cz>
+#   Copyright © 2017, 2018 Vladimír Vondruš <mosra@centrum.cz>
 #
 #   Permission is hereby granted, free of charge, to any person obtaining a
 #   copy of this software and associated documentation files (the "Software"),
@@ -34,6 +34,8 @@ class Blog(BlogTestCase):
             'AUTHOR': "Implicit Author",
             'STATIC_PATHS': ['ship.jpg'],
             'M_BLOG_URL': 'archives.html',
+            'M_FAVICON': ('favicon.png', 'image/png'),
+            'M_BLOG_FAVICON': ('favicon-blog.ico', 'image/x-icon'),
             'FORMATTED_FIELDS': ['summary', 'description']
         })
 
@@ -447,6 +449,7 @@ class HtmlEscape(BlogTestCase):
             'SITENAME': '<&> in site name',
             'M_BLOG_NAME': '<&> in blog name',
             'M_BLOG_URL': 'archives.html?and&in&url=""',
+            'M_BLOG_FAVICON': ('favicon.ico?and&in&url=""', 'huh&what'),
             'ARTICLE_URL': '{slug}.html?and&in&url=""',
             'AUTHOR_URL': 'author-{slug}.html?and&in&url=""',
             'CATEGORY_URL': 'category-{slug}.html?and&in&url=""',
@@ -494,3 +497,55 @@ class GlobalSocialMeta(BlogTestCase):
         self.assertEqual(*self.actual_expected_contents('category-a-category.html'))
         self.assertEqual(*self.actual_expected_contents('author-the-author.html'))
         self.assertEqual(*self.actual_expected_contents('tag-a-tag.html'))
+
+class ArchivedArticle(BlogTestCase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(__file__, 'archived_article', *args, **kwargs)
+
+    def test(self):
+        self.run_pelican({
+            'M_ARCHIVED_ARTICLE_BADGE': """
+.. container:: m-note m-warning
+
+    This article is from {year}. **It's old.** Deal with it.
+"""
+        })
+
+        self.assertEqual(*self.actual_expected_contents('article.html'))
+        self.assertEqual(*self.actual_expected_contents('article-jumbo.html'))
+
+class GlobalFavicon(BlogTestCase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(__file__, 'global_favicon', *args, **kwargs)
+
+    def test(self):
+        self.run_pelican({
+            'M_FAVICON': ('favicon.png', 'image/png'),
+            'M_DISABLE_SOCIAL_META_TAGS': True
+        })
+
+        self.assertEqual(*self.actual_expected_contents('index.html'))
+
+class NewsOnIndex(BlogTestCase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(__file__, 'news_on_index', *args, **kwargs)
+
+    def test(self):
+        self.run_pelican({
+            'M_BLOG_URL': 'http://our.blog/',
+            'M_NEWS_ON_INDEX': ("Latest rants on our blog", 2)
+        })
+
+        self.assertEqual(*self.actual_expected_contents('index.html'))
+
+class Draft(BlogTestCase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(__file__, 'draft', *args, **kwargs)
+
+    def test(self):
+        self.run_pelican({
+            'DRAFT_URL': '{slug}.html',
+            'DRAFT_SAVE_AS': '{slug}.html'
+        })
+
+        self.assertEqual(*self.actual_expected_contents('article.html'))

@@ -2,7 +2,7 @@
 #
 #   This file is part of m.css.
 #
-#   Copyright © 2017 Vladimír Vondruš <mosra@centrum.cz>
+#   Copyright © 2017, 2018 Vladimír Vondruš <mosra@centrum.cz>
 #
 #   Permission is hereby granted, free of charge, to any person obtaining a
 #   copy of this software and associated documentation files (the "Software"),
@@ -174,15 +174,26 @@ class Include(docutils.parsers.rst.directives.misc.Include):
         return codeblock.run()
 
 def code(role, rawtext, text, lineno, inliner, options={}, content=[]):
+    # In order to properly preserve backslashes
+    i = rawtext.find('`')
+    text = rawtext.split('`')[1]
+
     set_classes(options)
     classes = []
     if 'classes' in options:
         classes += options['classes']
         del options['classes']
 
-    # Not sure why language is duplicated in classes?
-    language = options.get('language', '')
+    # If language is not specified, render a simple literal
+    if not 'language' in options:
+        content = nodes.raw('', utils.unescape(text), format='html')
+        node = nodes.literal(rawtext, '', **options)
+        node.append(content)
+        return [node], []
+
+    language = options['language']
     del options['language']
+    # Not sure why language is duplicated in classes?
     if language in classes: classes.remove(language)
 
     class_, highlighted = _highlight(utils.unescape(text), language, options)

@@ -1,7 +1,7 @@
 ..
     This file is part of m.css.
 
-    Copyright © 2017 Vladimír Vondruš <mosra@centrum.cz>
+    Copyright © 2017, 2018 Vladimír Vondruš <mosra@centrum.cz>
 
     Permission is hereby granted, free of charge, to any person obtaining a
     copy of this software and associated documentation files (the "Software"),
@@ -32,7 +32,7 @@ Metadata
     .. note-dim::
         :class: m-text-center
 
-        `« Links <{filename}/plugins/links.rst>`_ | `Pelican plugins <{filename}/plugins.rst>`_
+        `« Links and other <{filename}/plugins/links.rst>`_ | `Pelican plugins <{filename}/plugins.rst>`_
 
 .. role:: html(code)
     :language: html
@@ -42,6 +42,9 @@ Metadata
     :language: rst
 
 Assigns additional description and images to categories, authors and tags.
+
+.. contents::
+    :class: m-block m-default
 
 `How to use`_
 =============

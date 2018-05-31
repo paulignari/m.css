@@ -2,7 +2,7 @@
 #
 #   This file is part of m.css.
 #
-#   Copyright © 2017 Vladimír Vondruš <mosra@centrum.cz>
+#   Copyright © 2017, 2018 Vladimír Vondruš <mosra@centrum.cz>
 #
 #   Permission is hereby granted, free of charge, to any person obtaining a
 #   copy of this software and associated documentation files (the "Software"),
@@ -35,6 +35,13 @@ def glext(name, rawtext, text, lineno, inliner, options={}, content=[]):
     node = nodes.reference(rawtext, title, refuri=url, **options)
     return [node], []
 
+def webglext(name, rawtext, text, lineno, inliner, options={}, content=[]):
+    title, extension = parse_link(text)
+    if not title: title = extension
+    url = "https://www.khronos.org/registry/webgl/extensions/{}/".format(extension)
+    node = nodes.reference(rawtext, title, refuri=url, **options)
+    return [node], []
+
 def glfn(name, rawtext, text, lineno, inliner, options={}, content=[]):
     title, fn = parse_link(text)
     if not title: title = "gl{}()".format(fn)
@@ -51,5 +58,6 @@ def glfnext(name, rawtext, text, lineno, inliner, options={}, content=[]):
 
 def register():
     rst.roles.register_local_role('glext', glext)
+    rst.roles.register_local_role('webglext', webglext)
     rst.roles.register_local_role('glfn', glfn)
     rst.roles.register_local_role('glfnext', glfnext)

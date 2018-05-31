@@ -1,7 +1,7 @@
 ..
     This file is part of m.css.
 
-    Copyright © 2017 Vladimír Vondruš <mosra@centrum.cz>
+    Copyright © 2017, 2018 Vladimír Vondruš <mosra@centrum.cz>
 
     Permission is hereby granted, free of charge, to any person obtaining a
     copy of this software and associated documentation files (the "Software"),
@@ -27,7 +27,7 @@ Test
 
 :save_as: plugins/images/test/index.html
 :breadcrumb: {filename}/plugins.rst Pelican plugins
-             {filename}/plugins/images.rst
+             {filename}/plugins/images.rst Images
 
 `Images, figures`_
 ==================

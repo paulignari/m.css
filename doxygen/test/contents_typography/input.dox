@@ -8,6 +8,10 @@
 
 Paragraph \n with \n explicit \n line \n breaks.
 
+<pre>Differently
+  preformatted
+text.</pre>
+
 @subsection subsection Page subsection
 
 -   Unordered
@@ -30,10 +34,16 @@ Paragraph \n with \n explicit \n line \n breaks.
 
 This is a `typewriter text`, *emphasis* and **bold**. <em>Emphasis with
 <tt>typewriter</tt> and <strong>bold</strong> nested.</em> http://google.com
-and [URL](http://google.com). En-dash -- and em-dash ---. Reference to a
-@ref subsection. Named reference with special characters in title:
-@ref warnings "&raquo; Warnings &laquo;". Reference with escaped characters
-in&nbsp;title: @ref an-anchor "<anchor>".
+and [URL](http://google.com). <small>Small *text*.</small> En-dash -- and
+em-dash ---. Reference to a @ref subsection. Named reference with special
+characters in title: @ref warnings "&raquo; Warnings &laquo;". Reference with
+escaped characters in&nbsp;title: @ref an-anchor "<anchor>".
+
+Empty elements: <em></em> <tt></tt> <strong></strong> <pre></pre> <small></small>
+
+- - -
+
+Above is a horizontal line.
 
 */
 

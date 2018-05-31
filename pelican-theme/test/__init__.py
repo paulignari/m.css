@@ -1,7 +1,7 @@
 #
 #   This file is part of m.css.
 #
-#   Copyright © 2017 Vladimír Vondruš <mosra@centrum.cz>
+#   Copyright © 2017, 2018 Vladimír Vondruš <mosra@centrum.cz>
 #
 #   Permission is hereby granted, free of charge, to any person obtaining a
 #   copy of this software and associated documentation files (the "Software"),
@@ -105,8 +105,8 @@ class BlogTestCase(BaseTestCase):
             'DATE_FORMATS': {'en': ('en_US.UTF-8', '%b %d, %Y')},
             'M_FINE_PRINT': None,
             'M_DISABLE_SOCIAL_META_TAGS': True,
-            'PAGE_PATHS': ['pages'], # doesn't exist
-            'ARTICLE_PATHS': ['.'],
+            'PAGE_PATHS': ['pages'], # doesn't exist, usually
+            'ARTICLE_PATHS': [''],
             'AUTHOR_SAVE_AS': 'author-{slug}.html',
             'AUTHOR_URL': 'author-{slug}.html',
             'CATEGORY_SAVE_AS': 'category-{slug}.html',

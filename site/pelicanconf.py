@@ -1,7 +1,7 @@
 #
 #   This file is part of m.css.
 #
-#   Copyright © 2017 Vladimír Vondruš <mosra@centrum.cz>
+#   Copyright © 2017, 2018 Vladimír Vondruš <mosra@centrum.cz>
 #
 #   Permission is hereby granted, free of charge, to any person obtaining a
 #   copy of this software and associated documentation files (the "Software"),
@@ -21,6 +21,9 @@
 #   FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 #   DEALINGS IN THE SOFTWARE.
 #
+
+import shutil
+import logging
 
 AUTHOR = 'Vladimír Vondruš'
 
@@ -57,6 +60,8 @@ AUTHOR_FEED_RSS = None
 M_BLOG_NAME = "m.css example articles"
 M_BLOG_URL = 'examples/'
 
+M_FAVICON = ('favicon.ico', 'image/x-icon')
+
 M_SOCIAL_TWITTER_SITE = '@czmosra'
 M_SOCIAL_TWITTER_SITE_ID = 1537427036
 M_SOCIAL_IMAGE = 'static/site.jpg'
@@ -82,7 +87,8 @@ M_LINKS_NAVBAR2 = [('Pelican plugins', 'plugins/', 'plugins', [
                         ('Components', 'plugins/components/', 'plugins/components'),
                         ('Images', 'plugins/images/', 'plugins/images'),
                         ('Math and code', 'plugins/math-and-code/', 'plugins/math-and-code'),
-                        ('Links', 'plugins/links/', 'plugins/links'),
+                        ('Links and other', 'plugins/links/', 'plugins/links'),
+                        ('Plots', 'plugins/plots/', 'plugins/plots'),
                         ('Metadata', 'plugins/metadata/', 'plugins/metadata')]),
                    ('Doxygen theme', 'doxygen/', 'doxygen', []),
                    ('GitHub', 'https://github.com/mosra/m.css', '', [])]
@@ -92,7 +98,8 @@ M_LINKS_FOOTER1 = [('m.css', '/'),
                    ('GitHub', 'https://github.com/mosra/m.css'),
                    ('Gitter', 'https://gitter.im/mosra/m.css'),
                    ('E-mail', 'mailto:mosra@centrum.cz'),
-                   ('Twitter', 'https://twitter.com/czmosra')]
+                   ('Twitter', 'https://twitter.com/czmosra'),
+                   ('Build Status', 'build-status/')]
 
 M_LINKS_FOOTER2 = [('CSS', 'css/'),
                    ('Grid system', 'css/grid/'),
@@ -112,20 +119,22 @@ M_LINKS_FOOTER4 = [('Pelican plugins', 'plugins/'),
                    ('Components', 'plugins/components/'),
                    ('Images', 'plugins/images/'),
                    ('Math and code', 'plugins/math-and-code/'),
-                   ('Links', 'plugins/links/'),
+                   ('Plots', 'plugins/plots/'),
+                   ('Links and other', 'plugins/links/'),
                    ('Metadata', 'plugins/metadata/')]
 
 M_FINE_PRINT = """
-m.css. Copyright © Vladimír Vondruš 2017. Site powered by `Pelican <https://getpelican.com>`_
-and m.css (yes, I am eating my own dog food). Both the code and site content is
-`available on GitHub under MIT <https://github.com/mosra/m.css>`_. Contact the
-author via `e-mail <mosra@centrum.cz>`_, :abbr:`Jabber <mosra@jabbim.cz>`,
-`Twitter <https://twitter.com/czmosra>`_ or smoke signals.
+| m.css. Copyright © `Vladimír Vondruš <http://mosra.cz>`_, 2017--2018. Site
+  powered by `Pelican <https://getpelican.com>`_ and m.css.
+| Code and content is `available on GitHub under MIT <https://github.com/mosra/m.css>`_.
+  Contact the author via `Gitter <https://gitter.im/mosra/m.css>`_,
+  `e-mail <mosra@centrum.cz>`_ or `Twitter <https://twitter.com/czmosra>`_.
 """
 
 DEFAULT_PAGINATION = 10
 
 STATIC_PATHS = ['static']
+EXTRA_PATH_METADATA = {'static/favicon.ico': {'path': 'favicon.ico'}}
 
 PLUGIN_PATHS = ['../pelican-plugins']
 PLUGINS = ['m.abbr',
@@ -138,7 +147,8 @@ PLUGINS = ['m.abbr',
            'm.htmlsanity',
            'm.images',
            'm.math',
-           'm.metadata']
+           'm.metadata',
+           'm.plots']
 
 THEME = '../pelican-theme'
 THEME_STATIC_DIR = 'static'
@@ -156,6 +166,10 @@ M_HTMLSANITY_SMART_QUOTES = True
 M_HTMLSANITY_HYPHENATION = True
 M_DOX_TAGFILES = [
     ('../doc/doxygen/corrade.tag', 'http://doc.magnum.graphics/corrade/', ['Corrade::'])]
+
+if not shutil.which('latex'):
+    logging.warning("LaTeX not found, fallback to rendering math as code")
+    M_MATH_RENDER_AS_CODE = True
 
 DIRECT_TEMPLATES = ['archives']
 

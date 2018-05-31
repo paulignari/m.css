@@ -1,7 +1,7 @@
 #
 #   This file is part of m.css.
 #
-#   Copyright © 2017 Vladimír Vondruš <mosra@centrum.cz>
+#   Copyright © 2017, 2018 Vladimír Vondruš <mosra@centrum.cz>
 #
 #   Permission is hereby granted, free of charge, to any person obtaining a
 #   copy of this software and associated documentation files (the "Software"),
@@ -57,3 +57,46 @@ class Toc(IntegrationTestCase):
     def test(self):
         self.run_dox2html5(wildcard='page-toc.xml')
         self.assertEqual(*self.actual_expected_contents('page-toc.html'))
+
+class InNavbar(IntegrationTestCase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(__file__, 'in_navbar', *args, **kwargs)
+
+    def test(self):
+        self.run_dox2html5(wildcard='page*.xml')
+        self.assertEqual(*self.actual_expected_contents('page-in-navbar.html'))
+        self.assertEqual(*self.actual_expected_contents('page-b.html'))
+
+class FooterNavigation(IntegrationTestCase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(__file__, 'footernavigation', *args, **kwargs)
+
+    def test(self):
+        self.run_dox2html5(wildcard='subpage*.xml')
+        self.assertEqual(*self.actual_expected_contents('subpage1.html'))
+        self.assertEqual(*self.actual_expected_contents('subpage2.html'))
+
+class EmptyIndex(IntegrationTestCase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(__file__, 'empty_index', *args, **kwargs)
+
+    def test(self):
+        self.run_dox2html5(wildcard='indexpage.xml')
+        self.assertEqual(*self.actual_expected_contents('index.html'))
+
+class EmptyTitle(IntegrationTestCase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(__file__, 'empty_title', *args, **kwargs)
+
+    def test(self):
+        self.run_dox2html5(wildcard='untitled.xml')
+        self.assertEqual(*self.actual_expected_contents('untitled.html'))
+
+class SubpageOfIndex(IntegrationTestCase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(__file__, 'subpage_of_index', *args, **kwargs)
+
+    def test(self):
+        self.run_dox2html5(wildcard='*.xml')
+        self.assertEqual(*self.actual_expected_contents('page.html'))
+        self.assertEqual(*self.actual_expected_contents('pages.html'))

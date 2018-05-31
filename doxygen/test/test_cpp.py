@@ -1,7 +1,7 @@
 #
 #   This file is part of m.css.
 #
-#   Copyright © 2017 Vladimír Vondruš <mosra@centrum.cz>
+#   Copyright © 2017, 2018 Vladimír Vondruš <mosra@centrum.cz>
 #
 #   Permission is hereby granted, free of charge, to any person obtaining a
 #   copy of this software and associated documentation files (the "Software"),
@@ -48,3 +48,16 @@ class TemplateAlias(IntegrationTestCase):
         self.run_dox2html5(wildcard='*.xml')
         self.assertEqual(*self.actual_expected_contents('File_8h.html'))
         self.assertEqual(*self.actual_expected_contents('structTemplate.html'))
+
+class Derived(IntegrationTestCase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(__file__, 'derived', *args, **kwargs)
+
+    def test(self):
+        self.run_dox2html5(wildcard='*.xml')
+        self.assertEqual(*self.actual_expected_contents('classNamespace_1_1A.html'))
+        self.assertEqual(*self.actual_expected_contents('classNamespace_1_1PrivateBase.html'))
+        self.assertEqual(*self.actual_expected_contents('classAnother_1_1ProtectedBase.html'))
+        self.assertEqual(*self.actual_expected_contents('classNamespace_1_1VirtualBase.html'))
+        self.assertEqual(*self.actual_expected_contents('classBaseOutsideANamespace.html'))
+        self.assertEqual(*self.actual_expected_contents('classDerivedOutsideANamespace.html'))

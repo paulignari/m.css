@@ -20,6 +20,9 @@
   <link rel="stylesheet" href="{{ style|expand_link(page)|e }}" />
   {% endfor %}
   {% endif %}
+  {% if M_FAVICON %}
+  <link rel="icon" href="{{ M_FAVICON[0]|format_siteurl|e }}" type="{{ M_FAVICON[1]|e }}" />
+  {% endif %}
   <link rel="canonical" href="{{ page.url|format_siteurl|e }}" />
 {% endblock %}
 
@@ -53,7 +56,11 @@
 {% endblock %}
 
 {% block main %}
-{% if not page.landing and page.header %}
+{% if not page.landing %}
+{% if page.cover %}
+<div id="m-cover-image" style="background-image: url('{{ page.cover|expand_link(page)|e }}');"><div></div></div>
+{% endif %}
+{% if page.header %}
 <div class="m-container m-container-inflatable">
   <div class="m-row">
     <div class="m-col-l-10 m-push-l-1 m-nopadb">
@@ -63,6 +70,7 @@
     </div>
   </div>
 </div>
+{% endif %}
 {% endif %}
 <article>
   {% if page.landing %}
@@ -102,6 +110,20 @@
         {% endif %}
       </div>
     </div>
+    {% if page.save_as == 'index.html' and not page.url and M_NEWS_ON_INDEX %}
+    <div class="m-row">
+      <div class="m-col-l-8 m-push-l-2">
+        <div><div class="m-note m-default m-landing-news">
+          <h3><a href="{{ M_BLOG_URL|format_siteurl|e }}">{{ M_NEWS_ON_INDEX[0]|e }} &raquo;</a></h3>
+          <ul class="m-unstyled">
+            {% for article in articles[0:M_NEWS_ON_INDEX[1]] %}
+            <li><time class="m-text m-dim" datetime="{{ article.date.isoformat() }}">{{ article.locale_date }}</time><a href="{{ article.url }}">{{ article.title|e }}</a></li>
+            {% endfor %}
+          </ul>
+        </div>
+      </div></div>
+    </div>
+    {% endif %}
   </div>
 </article>
 {% if page.footer %}

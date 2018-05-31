@@ -1,9 +1,9 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 #
 #   This file is part of m.css.
 #
-#   Copyright © 2017 Vladimír Vondruš <mosra@centrum.cz>
+#   Copyright © 2017, 2018 Vladimír Vondruš <mosra@centrum.cz>
 #
 #   Permission is hereby granted, free of charge, to any person obtaining a
 #   copy of this software and associated documentation files (the "Software"),
@@ -26,15 +26,20 @@
 
 import xml.etree.ElementTree as ET
 import argparse
+import base64
+import copy
 import sys
 import re
 import html
 import os
 import glob
+import mimetypes
 import shutil
+import struct
 import subprocess
 import urllib.parse
 import logging
+from enum import Flag
 from types import SimpleNamespace as Empty
 from typing import Tuple, Dict, Any, List
 
@@ -44,12 +49,299 @@ from pygments import highlight
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import TextLexer, BashSessionLexer, get_lexer_by_name, find_lexer_class_for_filename
 
-sys.path.append("../pelican-plugins")
+sys.path.append(os.path.join(os.path.dirname(os.path.realpath(__file__)), '../pelican-plugins'))
 import latex2svg
-import m.math
+import latex2svgextra
 import ansilexer
 
-xref_id_rx = re.compile(r"""(.*)_1(_[a-z-]+[0-9]+)$""")
+class Trie:
+    #  root  |     |     header         | results | child 1 | child 1 | child 1 |
+    # offset | ... | result # | value # |   ...   |  char   | barrier | offset  | ...
+    #  32b   |     |    8b    |   8b    |  n*16b  |   8b    |    1b   |   23b   |
+    root_offset_struct = struct.Struct('<I')
+    header_struct = struct.Struct('<BB')
+    result_struct = struct.Struct('<H')
+    child_struct = struct.Struct('<I')
+    child_char_struct = struct.Struct('<B')
+
+    def __init__(self):
+        self.results = []
+        self.children = {}
+
+    def _insert(self, path: bytes, result, lookahead_barriers):
+        if not path:
+            self.results += [result]
+            return
+
+        char = path[0]
+        if not char in self.children:
+            self.children[char] = (False, Trie())
+        if lookahead_barriers and lookahead_barriers[0] == 0:
+            lookahead_barriers = lookahead_barriers[1:]
+            self.children[char] = (True, self.children[char][1])
+        self.children[char][1]._insert(path[1:], result, [b - 1 for b in lookahead_barriers])
+
+    def insert(self, path: str, result, lookahead_barriers=[]):
+        self._insert(path.encode('utf-8'), result, lookahead_barriers)
+
+    # Returns offset of the serialized thing in `output`
+    def _serialize(self, hashtable, output: bytearray, merge_subtrees) -> int:
+        # Serialize all children first
+        child_offsets = []
+        for char, child in self.children.items():
+            offset = child[1]._serialize(hashtable, output, merge_subtrees=merge_subtrees)
+            child_offsets += [(char, child[0], offset)]
+
+        # Serialize this node
+        serialized = bytearray()
+        serialized += self.header_struct.pack(len(self.results), len(self.children))
+        for v in self.results:
+            serialized += self.result_struct.pack(v)
+
+        # Serialize child offsets
+        for char, lookahead_barrier, abs_offset in child_offsets:
+            assert abs_offset < 2**23
+
+            # write them over each other because that's the only way to pack
+            # a 24 bit field
+            offset = len(serialized)
+            serialized += self.child_struct.pack(abs_offset | ((1 if lookahead_barrier else 0) << 23))
+            self.child_char_struct.pack_into(serialized, offset + 3, char)
+
+        # Subtree merging: if this exact tree is already in the table, return
+        # its offset. Otherwise add it and return the new offset.
+        # TODO: why hashable = bytes(output[base_offset:] + serialized) didn't work?
+        hashable = bytes(serialized)
+        if merge_subtrees and hashable in hashtable:
+            return hashtable[hashable]
+        else:
+            offset = len(output)
+            output += serialized
+            if merge_subtrees: hashtable[hashable] = offset
+            return offset
+
+    def serialize(self, merge_subtrees=True) -> bytearray:
+        output = bytearray(b'\x00\x00\x00\x00')
+        hashtable = {}
+        self.root_offset_struct.pack_into(output, 0, self._serialize(hashtable, output, merge_subtrees=merge_subtrees))
+        return output
+
+class ResultFlag(Flag):
+    HAS_SUFFIX = 1 << 0
+    HAS_PREFIX = 1 << 3
+    DEPRECATED = 1 << 1
+    DELETED = 1 << 2
+
+    _TYPE = 0xf << 4
+    ALIAS = 0 << 4
+    NAMESPACE = 1 << 4
+    CLASS = 2 << 4
+    STRUCT = 3 << 4
+    UNION = 4 << 4
+    TYPEDEF = 5 << 4
+    FUNC = 6 << 4
+    VAR = 7 << 4
+    ENUM = 8 << 4
+    ENUM_VALUE = 9 << 4
+    DEFINE = 10 << 4
+    GROUP = 11 << 4
+    PAGE = 12 << 4
+    DIR = 13 << 4
+    FILE = 14 << 4
+
+class ResultMap:
+    # item 1 flags | item 2 flags |     | item N flags | file | item 1 |
+    #   + offset   |   + offset   | ... |   + offset   | size |  data  | ...
+    #    8 + 24b   |    8 + 24b   |     |    8 + 24b   |  32b |        |
+    #
+    # basic item (flags & 0b11 == 0b00):
+    #
+    # name | \0 | URL
+    #      |    |
+    #      | 8b |
+    #
+    # suffixed item (flags & 0b11 == 0b01):
+    #
+    # suffix | name | \0 | URL
+    # length |      |    |
+    #   8b   |      | 8b |
+    #
+    # prefixed item (flags & 0xb11 == 0b10):
+    #
+    #  prefix  |  name  | \0 |  URL
+    # id + len | suffix |    | suffix
+    # 16b + 8b |        | 8b |
+    #
+    # prefixed & suffixed item (flags & 0xb11 == 0b11):
+    #
+    #  prefix  | suffix |  name  | \0 | URL
+    # id + len | length | suffix |    |
+    # 16b + 8b |   8b   |        | 8b |
+    #
+    # alias item (flags & 0xf0 == 0x00):
+    #
+    # alias |     | alias
+    #  id   | ... | name
+    #  16b  |     |
+    #
+    offset_struct = struct.Struct('<I')
+    flags_struct = struct.Struct('<B')
+    prefix_struct = struct.Struct('<HB')
+    suffix_length_struct = struct.Struct('<B')
+    alias_struct = struct.Struct('<H')
+
+    def __init__(self):
+        self.entries = []
+
+    def add(self, name, url, alias=None, suffix_length=0, flags=ResultFlag(0)) -> int:
+        if suffix_length: flags |= ResultFlag.HAS_SUFFIX
+        if alias is not None:
+            assert flags & ResultFlag._TYPE == ResultFlag.ALIAS
+
+        entry = Empty()
+        entry.name = name
+        entry.url = url
+        entry.flags = flags
+        entry.alias = alias
+        entry.prefix = 0
+        entry.prefix_length = 0
+        entry.suffix_length = suffix_length
+
+        self.entries += [entry]
+        return len(self.entries) - 1
+
+    def serialize(self, merge_prefixes=True) -> bytearray:
+        output = bytearray()
+
+        if merge_prefixes:
+            # Put all entry names into a trie to discover common prefixes
+            trie = Trie()
+            for index, e in enumerate(self.entries):
+                trie.insert(e.name, index)
+
+            # Create a new list with merged prefixes
+            merged = []
+            for index, e in enumerate(self.entries):
+                # Search in the trie and get the longest shared name prefix
+                # that is already fully contained in some other entry
+                current = trie
+                longest_prefix = None
+                for c in e.name.encode('utf-8'):
+                    for candidate, child in current.children.items():
+                        if c == candidate:
+                            current = child[1]
+                            break
+                    else: assert False # pragma: no cover
+
+                    # Allow self-reference only when referenced result suffix
+                    # is longer (otherwise cycles happen). This is for
+                    # functions that should appear when searching for foo (so
+                    # they get ordered properly based on the name lenght) and
+                    # also when searching for foo() (so everything that's not
+                    # a function gets filtered out). Such entries are
+                    # completely the same except for a different suffix length.
+                    if index in current.results:
+                        for i in current.results:
+                            if self.entries[i].suffix_length > self.entries[index].suffix_length:
+                                longest_prefix = current
+                                break
+                    elif current.results:
+                        longest_prefix = current
+
+                # Name prefix found, for all possible URLs find the one that
+                # shares the longest prefix
+                if longest_prefix:
+                    max_prefix = (0, -1)
+                    for longest_index in longest_prefix.results:
+                        # Ignore self (function self-reference, see above)
+                        if longest_index == index: continue
+
+                        prefix_length = 0
+                        for i in range(min(len(e.url), len(self.entries[longest_index].url))):
+                            if e.url[i] != self.entries[longest_index].url[i]: break
+                            prefix_length += 1
+                        if max_prefix[1] < prefix_length:
+                            max_prefix = (longest_index, prefix_length)
+
+                    # Expect we found something
+                    assert max_prefix[1] != -1
+
+                    # Save the entry with reference to the prefix
+                    entry = Empty()
+                    assert e.name.startswith(self.entries[longest_prefix.results[0]].name)
+                    entry.name = e.name[len(self.entries[longest_prefix.results[0]].name):]
+                    entry.url = e.url[max_prefix[1]:]
+                    entry.flags = e.flags|ResultFlag.HAS_PREFIX
+                    entry.alias = e.alias
+                    entry.prefix = max_prefix[0]
+                    entry.prefix_length = max_prefix[1]
+                    entry.suffix_length = e.suffix_length
+                    merged += [entry]
+
+                # No prefix found, copy the entry verbatim
+                else: merged += [e]
+
+            # Everything merged, replace the original list
+            self.entries = merged
+
+        # Write the offset array. Starting offset for items is after the offset
+        # array and the file size
+        offset = (len(self.entries) + 1)*4
+        for e in self.entries:
+            assert offset < 2**24
+            output += self.offset_struct.pack(offset)
+            self.flags_struct.pack_into(output, len(output) - 1, e.flags.value)
+
+            # The entry is an alias, extra field for alias index
+            if e.flags & ResultFlag._TYPE == ResultFlag.ALIAS:
+                offset += 2
+
+            # Extra field for prefix index and length
+            if e.flags & ResultFlag.HAS_PREFIX:
+                offset += 3
+
+            # Extra field for suffix length
+            if e.flags & ResultFlag.HAS_SUFFIX:
+                offset += 1
+
+            # Length of the name
+            offset += len(e.name.encode('utf-8'))
+
+            # Length of the URL and 0-delimiter. If URL is empty, it's not
+            # added at all, then the 0-delimiter is also not needed.
+            if e.name and e.url:
+                 offset += len(e.url.encode('utf-8')) + 1
+
+        # Write file size
+        output += self.offset_struct.pack(offset)
+
+        # Write the entries themselves
+        for e in self.entries:
+            if e.flags & ResultFlag._TYPE == ResultFlag.ALIAS:
+                assert not e.alias is None
+                assert not e.url
+                output += self.alias_struct.pack(e.alias)
+            if e.flags & ResultFlag.HAS_PREFIX:
+                output += self.prefix_struct.pack(e.prefix, e.prefix_length)
+            if e.flags & ResultFlag.HAS_SUFFIX:
+                output += self.suffix_length_struct.pack(e.suffix_length)
+            output += e.name.encode('utf-8')
+            if e.url:
+                output += b'\0'
+                output += e.url.encode('utf-8')
+
+        assert len(output) == offset
+        return output
+
+search_data_header_struct = struct.Struct('<3sBHI')
+
+def serialize_search_data(trie: Trie, map: ResultMap, symbol_count, merge_subtrees=True, merge_prefixes=True) -> bytearray:
+    serialized_trie = trie.serialize(merge_subtrees=merge_subtrees)
+    serialized_map = map.serialize(merge_prefixes=merge_prefixes)
+    # magic header, version, symbol count, offset of result map
+    return search_data_header_struct.pack(b'MCS', 0, symbol_count, len(serialized_trie) + 10) + serialized_trie + serialized_map
+
+xref_id_rx = re.compile(r"""(.*)_1(_[a-z-]+[0-9]+|@)$""")
 slugify_nonalnum_rx = re.compile(r"""[^\w\s-]""")
 slugify_hyphens_rx = re.compile(r"""[-\s]+""")
 
@@ -57,8 +349,14 @@ class State:
     def __init__(self):
         self.basedir = ''
         self.compounds: Dict[str, Any] = {}
+        self.search: List[Any] = []
+        self.examples: List[Any] = []
         self.doxyfile: Dict[str, str] = {}
         self.images: List[str] = []
+        self.current = ''
+        self.current_prefix = []
+        self.current_compound = None
+        self.parsing_toplevel_desc = False
 
 def slugify(text: str) -> str:
     # Maybe some Unicode normalization would be nice here?
@@ -89,7 +387,7 @@ def parse_ref(state: State, element: ET.Element) -> str:
         i = id.rindex('_1')
         url = id[:i] + '.html' + '#' + id[i+2:]
     else: # pragma: no cover
-        logging.critical("unknown <ref> kind {}".format(element.attrib['kindref']))
+        logging.critical("{}: unknown <ref> kind {}".format(state.current, element.attrib['kindref']))
         assert False
 
     if 'external' in element.attrib:
@@ -99,7 +397,7 @@ def parse_ref(state: State, element: ET.Element) -> str:
                 url = os.path.join(baseurl, url)
                 break
         else: # pragma: no cover
-            logging.critical("tagfile {} not specified in Doxyfile".format(element.attrib['external']))
+            logging.critical("{}: tagfile {} not specified in Doxyfile".format(state.current, element.attrib['external']))
             assert False
         class_ = 'm-dox-external'
     else:
@@ -107,10 +405,22 @@ def parse_ref(state: State, element: ET.Element) -> str:
 
     return '<a href="{}" class="{}">{}</a>'.format(url, class_, add_wbr(parse_inline_desc(state, element).strip()))
 
-def extract_id(element: ET.Element) -> str:
+def parse_id(element: ET.Element) -> Tuple[str, str]:
     id = element.attrib['id']
     i = id.rindex('_1')
-    return id[i+2:]
+    base_url = id[:i] + '.html'
+    return base_url, id[i+2:]
+
+def extract_id_hash(state: State, element: ET.Element) -> str:
+    # Can't use parse_id() here as sections with _1 in it have it verbatim
+    # unescaped and mess up with the rindex(). OTOH, can't use this approach in
+    # parse_id() because for example enums can be present in both file and
+    # namespace documentation, having the base_url either the file one or the
+    # namespace one, depending on what's documented better. Ugh. See the
+    # contents_section_underscore_one test for a verification.
+    id = element.attrib['id']
+    assert id.startswith(state.current_compound.url_base)
+    return id[len(state.current_compound.url_base)+2:]
 
 def fix_type_spacing(type: str) -> str:
     return type.replace('&lt; ', '&lt;').replace(' &gt;', '&gt;').replace(' &amp;', '&amp;').replace(' *', '*')
@@ -125,11 +435,17 @@ def parse_type(state: State, type: ET.Element) -> str:
         if i.tag == 'ref':
             out += parse_ref(state, i)
         elif i.tag == 'anchor':
-            out += '<a name="{}"></a>'.format(extract_id(i))
+            # Anchor, used for example in deprecated/todo lists. Its base_url
+            # is always equal to base_url of the page.
+            out += '<a name="{}"></a>'.format(extract_id_hash(state, i))
         else: # pragma: no cover
-            logging.warning("ignoring {} in <type>".format(i.tag))
+            logging.warning("{}: ignoring {} in <type>".format(state.current, i.tag))
 
         if i.tail: out += html.escape(i.tail)
+
+    # Warn if suspicious stuff is present
+    if '_EXPORT' in out or '_LOCAL' in out:
+        logging.warning("{}: type contains an export macro: {}".format(state.current, ''.join(type.itertext())))
 
     # Remove spacing inside <> and before & and *
     return fix_type_spacing(out)
@@ -140,8 +456,14 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
     out.templates = {}
     out.params = {}
     out.return_value = None
+    out.return_values = []
+    out.exceptions = []
     out.add_css_class = None
     out.footer_navigation = False
+    out.example_navigation = None
+    out.search_keywords = []
+    out.search_enum_values_as_keywords = False
+    out.is_deprecated = False
 
     # DOXYGEN <PARA> PATCHING 1/4
     #
@@ -178,6 +500,25 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
     # A CSS class to be added inline (not propagated outside of the paragraph)
     add_inline_css_class = None
 
+    # Also, to make things even funnier, parameter and return value description
+    # come from inside of some paragraph and can be nested also inside lists
+    # and whatnot. This bubbles them up. Unfortunately they can be scattered
+    # around, so also merging them together.
+    def merge_parsed_subsections(parsed):
+        if parsed.templates:
+            out.templates.update(parsed.templates)
+        if parsed.params:
+            out.params.update(parsed.params)
+        if parsed.return_value:
+            if out.return_value:
+                logging.warning("{}: superfluous @return section found, ignoring: {} ".format(state.current, ''.join(i.itertext())))
+            else:
+                out.return_value = parsed.return_value
+        if parsed.return_values:
+            out.return_values += parsed.return_values
+        if parsed.exceptions:
+            out.exceptions += parsed.exceptions
+
     i: ET.Element
     for index, i in enumerate(element):
         # State used later
@@ -188,7 +529,7 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
         # it. Expect that there was nothing after that would mess with us.
         # Don't reset it back to None just yet, as inline/block code
         # autodetection needs it.
-        if previous_section and i.tag != 'simplesect':
+        if previous_section and (i.tag != 'simplesect' or i.attrib['kind'] == 'return'):
             assert not out.write_paragraph_close_tag
             out.parsed = out.parsed.rstrip() + '</aside>'
 
@@ -205,8 +546,9 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
         # Those elements are:
         # - <heading>
         # - <blockquote>
+        # - <hruler>
         # - <simplesect> (if not describing return type) and <xrefsect>
-        # - <verbatim>
+        # - <verbatim>, <preformatted> (those are the same thing!)
         # - <variablelist>, <itemizedlist>, <orderedlist>
         # - <image>, <table>
         # - <mcss:div>
@@ -230,7 +572,7 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
             end_previous_paragraph = False
 
             # Straightforward elements
-            if i.tag in ['heading', 'blockquote', 'xrefsect', 'variablelist', 'verbatim', 'itemizedlist', 'orderedlist', 'image', 'table', '{http://mcss.mosra.cz/doxygen/}div']:
+            if i.tag in ['heading', 'blockquote', 'hruler', 'xrefsect', 'variablelist', 'verbatim', 'preformatted', 'itemizedlist', 'orderedlist', 'image', 'table', '{http://mcss.mosra.cz/doxygen/}div']:
                 end_previous_paragraph = True
 
             # <simplesect> describing return type is cut out of text flow, so
@@ -240,12 +582,11 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
 
             # <formula> can be both, depending on what's inside
             elif i.tag == 'formula':
-                if i.text.startswith('\[ ') and i.text.endswith(' \]'):
+                if i.text.startswith('$') and i.text.endswith('$'):
+                    formula_block = False
+                else:
                     end_previous_paragraph = True
                     formula_block = True
-                else:
-                    assert i.text.startswith('$ ') and i.text.endswith(' $')
-                    formula_block = False
 
             # <programlisting> is autodetected to be either block or inline
             elif i.tag == 'programlisting':
@@ -280,7 +621,7 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
                 elif len([codeline for codeline in i]) > 1:
                     end_previous_paragraph = True
                     code_block = True
-                    logging.warning("Inline code has multiple lines, fallback to a code block")
+                    logging.warning("{}: inline code has multiple lines, fallback to a code block".format(state.current))
 
                 # Otherwise wrap it in <p> and use <code>
                 else:
@@ -316,49 +657,102 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
             has_block_elements = True
 
             parsed = parse_desc_internal(state, i)
-            assert parsed.section
-            assert not parsed.templates and not parsed.params and not parsed.return_value
 
-            # Top-level section has no ID or title
-            if not out.section: out.section = ('', '', [])
-            out.section = (out.section[0], out.section[1], out.section[2] + [parsed.section])
-            out.parsed += '<section id="{}">{}</section>'.format(extract_id(i), parsed.parsed)
+            # Render as <section> in toplevel desc
+            if state.parsing_toplevel_desc:
+                assert parsed.section
+                assert not parsed.templates and not parsed.params and not parsed.return_value and not parsed.return_values and not parsed.exceptions
+
+                # Top-level section has no ID or title
+                if not out.section: out.section = ('', '', [])
+                out.section = (out.section[0], out.section[1], out.section[2] + [parsed.section])
+                out.parsed += '<section id="{}">{}</section>'.format(extract_id_hash(state, i), parsed.parsed)
+
+            # Render directly the contents otherwise, propagate parsed stuff up
+            else:
+                merge_parsed_subsections(parsed)
+                out.parsed += parsed.parsed
+
+            if parsed.search_keywords:
+                out.search_keywords += parsed.search_keywords
 
         elif i.tag == 'title':
             assert element.tag != 'para' # should be top-level block element
             has_block_elements = True
 
-            if element.tag == 'sect1':
-                tag = 'h2'
-            elif element.tag == 'sect2':
-                tag = 'h3'
-            elif element.tag == 'sect3':
-                tag = 'h4'
-            else: # pragma: no cover
-                assert False
-            id = extract_id(element)
-            title = html.escape(i.text)
+            # Top-level description
+            if state.parsing_toplevel_desc:
+                if element.tag == 'sect1':
+                    tag = 'h2'
+                elif element.tag == 'sect2':
+                    tag = 'h3'
+                elif element.tag == 'sect3':
+                    tag = 'h4'
+                elif not element.tag == 'simplesect':
+                    assert False # pragma: no cover
 
-            # Populate section info
-            assert not out.section
-            out.section = (id, title, [])
-            out.parsed += '<{0}><a href="#{1}">{2}</a></{0}>'.format(tag, id, title)
+            # Function/enum/... descriptions are inside <h3> for function
+            # header, which is inside <h2> for detailed definition section, so
+            # it needs to be <h4> and below
+            else:
+                if element.tag == 'sect1':
+                    tag = 'h4'
+                elif element.tag == 'sect2':
+                    tag = 'h5'
+                elif element.tag == 'sect3':
+                    tag = 'h6'
+                elif not element.tag == 'simplesect':
+                    assert False # pragma: no cover
+
+            # simplesect titles are handled directly inside simplesect
+            if not element.tag == 'simplesect':
+                id = extract_id_hash(state, element)
+                title = html.escape(i.text)
+
+                # Populate section info for top-level desc
+                if state.parsing_toplevel_desc:
+                    assert not out.section
+                    out.section = (id, title, [])
+                    out.parsed += '<{0}><a href="#{1}">{2}</a></{0}>'.format(tag, id, title)
+
+                # Otherwise add the ID directly to the heading
+                else:
+                    out.parsed += '<{0} id="{1}">{2}</{0}>'.format(tag, id, title)
 
         elif i.tag == 'heading':
             assert element.tag == 'para' # is inside a paragraph :/
             has_block_elements = True
 
-            if i.attrib['level'] == '1':
-                tag = 'h2'
-            elif i.attrib['level'] == '2':
-                tag = 'h3'
-            elif i.attrib['level'] == '3':
-                tag = 'h4'
-            elif i.attrib['level'] == '4':
-                tag = 'h5'
-            else: # pragma: no cover
-                assert False
-            logging.warning("Prefer @section over Markdown heading for properly generated TOC")
+            # Top-level description
+            if state.parsing_toplevel_desc:
+                if i.attrib['level'] == '1':
+                    tag = 'h2'
+                elif i.attrib['level'] == '2':
+                    tag = 'h3'
+                elif i.attrib['level'] == '3':
+                    tag = 'h4'
+                elif i.attrib['level'] == '4':
+                    tag = 'h5'
+                else: # pragma: no cover
+                    assert False
+
+                # Emit this warning only in top-level desc, TOC is not
+                # generated for function/enum/... descriptions
+                logging.warning("{}: prefer @section over Markdown heading for properly generated TOC".format(state.current))
+
+            # Function/enum/... descriptions are inside <h3> for function
+            # header, which is inside <h2> for detailed definition section, so
+            # it needs to be <h4> and below
+            else:
+                if i.attrib['level'] == '1':
+                    tag = 'h4'
+                elif i.attrib['level'] == '2':
+                    tag = 'h5'
+                elif i.attrib['level'] in ['3', '4']:
+                    tag = 'h6' # there is no <h7>
+                else: # pragma: no cover
+                    assert False
+
             out.parsed += '<{0}>{1}</{0}>'.format(tag, html.escape(i.text))
 
         elif i.tag == 'para':
@@ -391,18 +785,9 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
                 out.parsed += parsed.parsed
                 if parsed.write_paragraph_close_tag: out.parsed += '</p>'
 
-            # Also, to make things even funnier, parameter and return value
-            # description come from inside of some paragraph, so bubble them up
-            # and assume they are not scattered all over the place (ugh).
-            if parsed.templates:
-                assert not out.templates
-                out.templates = parsed.templates
-            if parsed.params:
-                assert not out.params
-                out.params = parsed.params
-            if parsed.return_value:
-                assert not out.return_value
-                out.return_value = parsed.return_value
+            # Paragraphs can have nested parameter / return value / ...
+            # descriptions, merge them to current state
+            merge_parsed_subsections(parsed)
 
             # The same is (of course) with bubbling up the <mcss:class>
             # element. Reset the current value with the value coming from
@@ -413,8 +798,13 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
             # resetting here explicitly.
             add_css_class = parsed.add_css_class
 
-            # Bubble up also the footer navigation
+            # Bubble up also footer / example navigation, search keywords,
+            # deprecation flag
             if parsed.footer_navigation: out.footer_navigation = True
+            if parsed.example_navigation: out.example_navigation = parsed.example_navigation
+            out.search_keywords += parsed.search_keywords
+            if parsed.search_enum_values_as_keywords: out.search_enum_values_as_keywords = True
+            if parsed.is_deprecated: out.is_deprecated = True
 
             # Assert we didn't miss anything important
             assert not parsed.section
@@ -430,9 +820,16 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
             tag = 'ul' if i.tag == 'itemizedlist' else 'ol'
             out.parsed += '<{}{}>'.format(tag,
                 ' class="{}"'.format(add_css_class) if add_css_class else '')
+
             for li in i:
                 assert li.tag == 'listitem'
-                out.parsed += '<li>{}</li>'.format(parse_desc(state, li))
+                parsed = parse_desc_internal(state, li)
+                out.parsed += '<li>{}</li>'.format(parsed.parsed)
+
+                # Lists can have nested parameter / return value / ...
+                # descriptions, bubble them up. THIS IS FUCKEN UNBELIEVABLE.
+                merge_parsed_subsections(parsed)
+
             out.parsed += '</{}>'.format(tag)
 
         elif i.tag == 'table':
@@ -440,23 +837,38 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
             has_block_elements = True
             out.parsed += '<table class="m-table{}">'.format(
                 ' ' + add_css_class if add_css_class else '')
+            thead_written = False
             inside_tbody = False
 
             row: ET.Element
             for row in i:
-                assert row.tag == 'row'
-                is_header_row = True
-                row_data = ''
-                for entry in row:
-                    assert entry.tag == 'entry'
-                    is_header = entry.attrib['thead'] == 'yes'
-                    is_header_row = is_header_row and is_header
-                    row_data += '<{0}>{1}</{0}>'.format('th' if is_header else 'td', parse_desc(state, entry))
-                if is_header_row:
-                    assert not inside_tbody # Assume there's only one header row
-                    out.parsed += '<thead><tr>{}</tr></thead><tbody>'.format(row_data)
-                    inside_tbody = True
-                else:
+                if row.tag == 'caption':
+                    out.parsed += '<caption>{}</caption>'.format(parse_inline_desc(state, row))
+
+                if row.tag == 'row':
+                    is_header_row = True
+                    row_data = ''
+                    for entry in row:
+                        assert entry.tag == 'entry'
+                        is_header = entry.attrib['thead'] == 'yes'
+                        is_header_row = is_header_row and is_header
+                        row_data += '<{0}>{1}</{0}>'.format('th' if is_header else 'td', parse_desc(state, entry))
+
+                    # Table head is opened upon encountering first header row
+                    # and closed upon encountering first body row (in case it was
+                    # ever opened). Encountering header row inside body again will
+                    # not do anything special.
+                    if is_header_row:
+                        if not thead_written:
+                            out.parsed += '<thead>'
+                            thead_written = True
+                    else:
+                        if thead_written and not inside_tbody:
+                            out.parsed += '</thead>'
+                        if not inside_tbody:
+                            out.parsed += '<tbody>'
+                            inside_tbody = True
+
                     out.parsed += '<tr>{}</tr>'.format(row_data)
 
             if inside_tbody: out.parsed += '</tbody>'
@@ -467,18 +879,20 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
 
             # Return value is separated from the text flow
             if i.attrib['kind'] == 'return':
-                assert not out.return_value
-                out.return_value = parse_desc(state, i)
+                if out.return_value:
+                    logging.warning("{}: superfluous @return section found, ignoring: {} ".format(state.current, ''.join(i.itertext())))
+                else:
+                    out.return_value = parse_desc(state, i)
             else:
                 has_block_elements = True
 
                 # There was a section open, but it differs from this one, close
                 # it
-                if previous_section and previous_section != i.attrib['kind']:
+                if previous_section and ((i.attrib['kind'] != 'par' and previous_section != i.attrib['kind']) or (i.attrib['kind'] == 'par' and i.find('title').text)):
                     out.parsed = out.parsed.rstrip() + '</aside>'
 
                 # Not continuing with a section from before, put a header in
-                if not previous_section or previous_section != i.attrib['kind']:
+                if not previous_section or (i.attrib['kind'] != 'par' and previous_section != i.attrib['kind']) or (i.attrib['kind'] == 'par' and i.find('title').text):
                     if i.attrib['kind'] == 'see':
                         out.parsed += '<aside class="m-note m-default"><h4>See also</h4>'
                     elif i.attrib['kind'] == 'note':
@@ -487,11 +901,41 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
                         out.parsed += '<aside class="m-note m-warning"><h4>Attention</h4>'
                     elif i.attrib['kind'] == 'warning':
                         out.parsed += '<aside class="m-note m-danger"><h4>Warning</h4>'
+                    elif i.attrib['kind'] == 'author':
+                        out.parsed += '<aside class="m-note m-default"><h4>Author</h4>'
+                    elif i.attrib['kind'] == 'authors':
+                        out.parsed += '<aside class="m-note m-default"><h4>Authors</h4>'
+                    elif i.attrib['kind'] == 'copyright':
+                        out.parsed += '<aside class="m-note m-default"><h4>Copyright</h4>'
+                    elif i.attrib['kind'] == 'version':
+                        out.parsed += '<aside class="m-note m-default"><h4>Version</h4>'
+                    elif i.attrib['kind'] == 'since':
+                        out.parsed += '<aside class="m-note m-default"><h4>Since</h4>'
+                    elif i.attrib['kind'] == 'date':
+                        out.parsed += '<aside class="m-note m-default"><h4>Date</h4>'
+                    elif i.attrib['kind'] == 'pre':
+                        out.parsed += '<aside class="m-note m-success"><h4>Precondition</h4>'
+                    elif i.attrib['kind'] == 'post':
+                        out.parsed += '<aside class="m-note m-success"><h4>Postcondition</h4>'
+                    elif i.attrib['kind'] == 'invariant':
+                        out.parsed += '<aside class="m-note m-success"><h4>Invariant</h4>'
+                    elif i.attrib['kind'] == 'remark':
+                        out.parsed += '<aside class="m-note m-default"><h4>Remark</h4>'
+                    elif i.attrib['kind'] == 'par':
+                        out.parsed += '<aside class="m-note m-default"><h4>{}</h4>'.format(html.escape(i.findtext('title', '')))
+                    elif i.attrib['kind'] == 'rcs':
+                        out.parsed += '<aside class="m-note m-default"><h4>{}</h4>'.format(html.escape(i.findtext('title', '')))
                     else: # pragma: no cover
                         out.parsed += '<aside class="m-note">'
-                        logging.warning("ignoring {} kind of <simplesect>".format(i.attrib['kind']))
+                        logging.warning("{}: ignoring {} kind of <simplesect>".format(state.current, i.attrib['kind']))
 
-                out.parsed += parse_desc(state, i)
+                # Parse the section contents and bubble important stuff up
+                parsed, search_keywords, search_enum_values_as_keywords = parse_desc_keywords(state, i)
+                out.parsed += parsed
+                if search_keywords:
+                    out.search_keywords += search_keywords
+                if search_enum_values_as_keywords:
+                    out.search_enum_values_as_keywords = True
 
                 # There's something after, close it
                 if i.tail and i.tail.strip():
@@ -513,7 +957,10 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
             id = i.attrib['id']
             match = xref_id_rx.match(id)
             file = match.group(1)
-            if file.startswith(('deprecated', 'bug')):
+            if file.startswith('deprecated'):
+                color = 'm-danger'
+                out.is_deprecated = True
+            elif file.startswith('bug'):
                 color = 'm-danger'
             elif file.startswith('todo'):
                 color = 'm-dim'
@@ -526,22 +973,30 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
             assert element.tag == 'para' # is inside a paragraph :/
             has_block_elements = True
 
-            out.param_kind = i.attrib['kind']
-            assert out.param_kind in ['param', 'templateparam']
             for param in i:
                 # This is an overcomplicated shit, so check sanity
+                # http://www.stack.nl/~dimitri/doxygen/manual/commands.html#cmdparam
                 assert param.tag == 'parameteritem'
                 assert len(param.findall('parameternamelist')) == 1
-                assert param.find('parameternamelist').find('parametertype') is None
-                assert len(param.find('parameternamelist').findall('parametername')) == 1
 
-                name = param.find('parameternamelist').find('parametername')
+                # This is only for PHP, ignore for now
+                param_names = param.find('parameternamelist')
+                assert param_names.find('parametertype') is None
+
                 description = parse_desc(state, param.find('parameterdescription'))
-                if i.attrib['kind'] == 'param':
-                    out.params[name.text] = (description, name.attrib['direction'] if 'direction' in name.attrib else '')
-                else:
-                    assert i.attrib['kind'] == 'templateparam'
-                    out.templates[name.text] = description
+
+                # Gather all names (so e.g. `@param x, y, z` is turned into
+                # three params sharing the same description)
+                for name in param_names.findall('parametername'):
+                    if i.attrib['kind'] == 'param':
+                        out.params[name.text] = (description, name.attrib['direction'] if 'direction' in name.attrib else '')
+                    elif i.attrib['kind'] == 'retval':
+                        out.return_values += [(name.text, description)]
+                    elif i.attrib['kind'] == 'exception':
+                        out.exceptions += [(name.text, description)]
+                    else:
+                        assert i.attrib['kind'] == 'templateparam'
+                        out.templates[name.text] = description
 
         elif i.tag == 'variablelist':
             assert element.tag == 'para' # is inside a paragraph :/
@@ -557,13 +1012,14 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
 
             out.parsed += '</dl>'
 
-        elif i.tag == 'verbatim':
+        elif i.tag in ['verbatim', 'preformatted']:
             assert element.tag == 'para' # is inside a paragraph :/
             has_block_elements = True
-            out.parsed += '<pre class="m-code">{}</pre>'.format(html.escape(i.text))
+            out.parsed += '<pre>{}</pre>'.format(html.escape(i.text or ''))
 
         elif i.tag == 'image':
-            assert element.tag == 'para' # is inside a paragraph :/
+            # can be in <para> but often also in <div> and other m.css-specific
+            # elements
             has_block_elements = True
 
             name = i.attrib['name']
@@ -572,7 +1028,7 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
                 if os.path.exists(path):
                     state.images += [path]
                 else:
-                    logging.warning("Image {} was not found in XML_OUTPUT".format(name))
+                    logging.warning("{}: image {} was not found in XML_OUTPUT".format(state.current, name))
 
                 caption = i.text
                 if caption:
@@ -583,9 +1039,12 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
                     out.parsed += '<img class="m-image{}" src="{}" alt="Image" />'.format(
                         ' ' + add_css_class if add_css_class else '', name)
 
+        elif i.tag == 'hruler':
+            assert element.tag == 'para' # is inside a paragraph :/
+            out.parsed += '<hr/>'
+
         # Custom <div> with CSS classes (for making dim notes etc)
         elif i.tag == '{http://mcss.mosra.cz/doxygen/}div':
-            assert element.tag == 'para' # is inside a paragraph :/
             has_block_elements = True
 
             out.parsed += '<div class="{}">{}</div>'.format(i.attrib['{http://mcss.mosra.cz/doxygen/}class'], parse_inline_desc(state, i).strip())
@@ -593,8 +1052,6 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
         # Adding a custom CSS class to the immediately following block/inline
         # element
         elif i.tag == '{http://mcss.mosra.cz/doxygen/}class':
-            assert element.tag == 'para' # is inside a paragraph :/
-
             # Bubble up in case we are alone in a paragraph, as that's meant to
             # affect the next paragraph content.
             if len([listing for listing in element]) == 1:
@@ -608,6 +1065,31 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
         # Enabling footer navigation in a page
         elif i.tag == '{http://mcss.mosra.cz/doxygen/}footernavigation':
             out.footer_navigation = True
+
+        # Enabling navigation for an example
+        elif i.tag == '{http://mcss.mosra.cz/doxygen/}examplenavigation':
+            out.example_navigation = (i.attrib['{http://mcss.mosra.cz/doxygen/}page'],
+                                      i.attrib['{http://mcss.mosra.cz/doxygen/}prefix'])
+
+        # Search-related stuff
+        elif i.tag == '{http://mcss.mosra.cz/doxygen/}search':
+            # Space-separated keyword list
+            if '{http://mcss.mosra.cz/doxygen/}keywords' in i.attrib:
+                out.search_keywords += [(keyword, '', 0) for keyword in i.attrib['{http://mcss.mosra.cz/doxygen/}keywords'].split(' ')]
+
+            # Keyword with custom result title
+            elif '{http://mcss.mosra.cz/doxygen/}keyword' in i.attrib:
+                out.search_keywords += [(
+                    i.attrib['{http://mcss.mosra.cz/doxygen/}keyword'],
+                    i.attrib['{http://mcss.mosra.cz/doxygen/}title'],
+                    int(i.attrib['{http://mcss.mosra.cz/doxygen/}suffix-length'] or '0'))]
+
+            # Add values of this enum as search keywords
+            elif '{http://mcss.mosra.cz/doxygen/}enum-values-as-keywords' in i.attrib:
+                out.search_enum_values_as_keywords = True
+
+            # Nothing else at the moment
+            else: assert False # pragma: no cover
 
         # Either block or inline
         elif i.tag == 'programlisting':
@@ -647,7 +1129,7 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
                             # (i.e., also ignoring false positives)
                             code += token.text
                         else: # pragma: no cover
-                            logging.warning("Unknown {} in a code block ".format(token.tag))
+                            logging.warning("{}: unknown {} in a code block ".format(state.current, token.tag))
 
                         if token.tail: code += token.tail
 
@@ -660,7 +1142,7 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
             if not code_block: code = code.strip()
 
             if not 'filename' in i.attrib:
-                logging.warning("No filename attribute in <programlisting>, assuming C++")
+                logging.warning("{}: no filename attribute in <programlisting>, assuming C++".format(state.current))
                 filename = 'file.cpp'
             else:
                 filename = i.attrib['filename']
@@ -671,6 +1153,9 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
                        # Pygments knows only .vert, .frag, .geo
                        ('.glsl', 'glsl'),
                        ('.conf', 'ini'),
+                       ('.xml-jinja', 'xml+jinja'),
+                       ('.html-jinja', 'html+jinja'),
+                       ('.jinja', 'jinja'),
                        ('.ansi', ansilexer.AnsiLexer)]
             for key, v in mapping:
                 if not filename.endswith(key): continue
@@ -687,7 +1172,7 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
                 # `.ext`
                 lexer = find_lexer_class_for_filename("code" + filename)
                 if not lexer:
-                    logging.warning("Unrecognized language of {} in <programlisting>, highlighting disabled".format(filename))
+                    logging.warning("{}: unrecognized language of {} in <programlisting>, highlighting disabled".format(state.current, filename))
                     lexer = TextLexer()
                 else: lexer = lexer()
 
@@ -713,24 +1198,27 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
         elif i.tag == 'formula':
             assert element.tag == 'para' # is inside a paragraph :/
 
+            logging.debug("{}: rendering math: {}".format(state.current, i.text))
+
+            # Assume that Doxygen wrapped the formula properly to distinguish
+            # between inline, block or special environment
+            rendered = latex2svg.latex2svg('{}'.format(i.text), params=latex2svgextra.params)
+
             # We should have decided about block/inline above
             assert formula_block is not None
             if formula_block:
                 has_block_elements = True
-                rendered = latex2svg.latex2svg('$${}$$'.format(i.text[3:-3]), params=m.math.latex2svg_params)
                 out.parsed += '<div class="m-math{}">{}</div>'.format(
                     ' ' + add_css_class if add_css_class else '',
-                    m.math._patch(i.text, rendered, ''))
+                    latex2svgextra.patch(i.text, rendered, ''))
             else:
-                rendered = latex2svg.latex2svg('${}$'.format(i.text[2:-2]), params=m.math.latex2svg_params)
-
                 # CSS classes and styling for proper vertical alignment. Depth is relative
                 # to font size, describes how below the line the text is. Scaling it back
                 # to 12pt font, scaled by 125% as set above in the config.
                 attribs = ' class="m-math{}" style="vertical-align: -{:.1f}pt;"'.format(
                     ' ' + add_inline_css_class if add_inline_css_class else '',
-                    rendered['depth']*12*1.25)
-                out.parsed += m.math._patch(i.text, rendered, attribs)
+                    (rendered['depth'] or 0.0)*12*1.25)
+                out.parsed += latex2svgextra.patch(i.text, rendered, attribs)
 
         # Inline elements
         elif i.tag == 'linebreak':
@@ -738,20 +1226,22 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
             out.parsed = out.parsed.rstrip() + '<br />'
 
         elif i.tag == 'anchor':
-            out.parsed += '<a name="{}"></a>'.format(extract_id(i))
+            out.parsed += '<a name="{}"></a>'.format(extract_id_hash(state, i))
 
         elif i.tag == 'computeroutput':
-            out.parsed += '<code>{}</code>'.format(parse_inline_desc(state, i).strip())
+            content = parse_inline_desc(state, i).strip()
+            if content: out.parsed += '<code>{}</code>'.format(content)
 
-        elif i.tag == 'emphasis':
-            out.parsed += '<em{}>{}</em>'.format(
-                ' class="{}"'.format(add_inline_css_class) if add_inline_css_class else '',
-                parse_inline_desc(state, i).strip())
+        elif i.tag in ['emphasis', 'bold', 'small']:
+            mapping = {'emphasis': 'em',
+                       'bold': 'strong',
+                       'small': 'small'}
 
-        elif i.tag == 'bold':
-            out.parsed += '<strong{}>{}</strong>'.format(
+            content = parse_inline_desc(state, i).strip()
+            if content: out.parsed += '<{0}{1}>{2}</{0}>'.format(
+                mapping[i.tag],
                 ' class="{}"'.format(add_inline_css_class) if add_inline_css_class else '',
-                parse_inline_desc(state, i).strip())
+                content)
 
         elif i.tag == 'ref':
             out.parsed += parse_ref(state, i)
@@ -774,12 +1264,12 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
 
         # Something new :O
         else: # pragma: no cover
-            logging.warning("Ignoring <{}> in desc".format(i.tag))
+            logging.warning("{}: ignoring <{}> in desc".format(state.current, i.tag))
 
         # Now we can reset previous_section to None, nobody needs it anymore.
         # Of course we're resetting it only in case nothing else (such as the
         # <simplesect> tag) could affect it in this iteration.
-        if i.tag != 'simplesect' and previous_section:
+        if (i.tag != 'simplesect' or i.attrib['kind'] == 'return') and previous_section:
             previous_section = None
 
         # A custom inline CSS class was used (or was meant to be used) in this
@@ -829,10 +1319,33 @@ def parse_desc_internal(state: State, element: ET.Element, immediate_parent: ET.
     # Brief description always needs to be single paragraph because we're
     # sending it out without enclosing <p>.
     if element.tag == 'briefdescription':
-        assert not has_block_elements and paragraph_count <= 1
-        if paragraph_count == 1:
-            assert out.parsed.startswith('<p>') and out.parsed.endswith('</p>')
-            out.parsed = out.parsed[3:-4]
+        # JAVADOC_AUTOBRIEF is *bad*
+        if state.doxyfile.get('JAVADOC_AUTOBRIEF', False):
+            # See the contents_brief_heading test for details
+            if has_block_elements:
+                logging.warning("{}: JAVADOC_AUTOBRIEF produced a brief description with block elements. That's not supported, ignoring the whole contents of {}".format(state.current, out.parsed))
+                out.parsed = ''
+
+            # See the contents_brief_multiline test for details
+            elif paragraph_count > 1:
+                logging.warning("{}: JAVADOC_AUTOBRIEF produced a multi-line brief description. That's not supported, using just the first paragraph of {}".format(state.current, out.parsed))
+
+                end = out.parsed.find('</p>')
+                assert out.parsed.startswith('<p>') and end != -1
+                out.parsed = out.parsed[3:end]
+
+            # See contents_brief_hr for why I need to check for out.parsed
+            elif paragraph_count == 1 and out.parsed:
+                assert out.parsed.startswith('<p>') and out.parsed.endswith('</p>')
+                out.parsed = out.parsed[3:-4]
+
+        # Sane behavior otherwise
+        else:
+            assert not has_block_elements and paragraph_count <= 1
+
+            if paragraph_count == 1:
+                assert out.parsed.startswith('<p>') and out.parsed.endswith('</p>')
+                out.parsed = out.parsed[3:-4]
 
     # Strip superfluous <p> for simple elments (list items, parameter and
     # return value description, table cells), but only if there is just a
@@ -848,55 +1361,82 @@ def parse_desc(state: State, element: ET.Element) -> str:
 
     # Verify that we didn't ignore any important info by accident
     parsed = parse_desc_internal(state, element)
-    assert not parsed.templates and not parsed.params and not parsed.return_value
+    assert not parsed.templates and not parsed.params and not parsed.return_value and not parsed.return_values
     assert not parsed.section # might be problematic
     return parsed.parsed
+
+def parse_desc_keywords(state: State, element: ET.Element) -> str:
+    if element is None: return ''
+
+    # Verify that we didn't ignore any important info by accident
+    parsed = parse_desc_internal(state, element)
+    assert not parsed.templates and not parsed.params and not parsed.return_value and not parsed.return_values and not parsed.exceptions
+    assert not parsed.section # might be problematic
+    return parsed.parsed, parsed.search_keywords, parsed.search_enum_values_as_keywords
+
+def parse_enum_desc(state: State, element: ET.Element) -> str:
+    # Verify that we didn't ignore any important info by accident
+    parsed = parse_desc_internal(state, element.find('detaileddescription'))
+    parsed.parsed += parse_desc(state, element.find('inbodydescription'))
+    assert not parsed.templates and not parsed.params and not parsed.return_value and not parsed.return_values and not parsed.exceptions
+    assert not parsed.section # might be problematic
+    return (parsed.parsed, parsed.search_keywords, parsed.search_enum_values_as_keywords, parsed.is_deprecated)
+
+def parse_enum_value_desc(state: State, element: ET.Element) -> str:
+    # Verify that we didn't ignore any important info by accident
+    parsed = parse_desc_internal(state, element.find('detaileddescription'))
+    assert not parsed.templates and not parsed.params and not parsed.return_value and not parsed.return_values and not parsed.exceptions
+    assert not parsed.section # might be problematic
+    return (parsed.parsed, parsed.search_keywords, parsed.is_deprecated)
 
 def parse_var_desc(state: State, element: ET.Element) -> str:
     # Verify that we didn't ignore any important info by accident
     parsed = parse_desc_internal(state, element.find('detaileddescription'))
     parsed.parsed += parse_desc(state, element.find('inbodydescription'))
-    assert not parsed.templates and not parsed.params and not parsed.return_value
+    assert not parsed.templates and not parsed.params and not parsed.return_value and not parsed.return_values and not parsed.exceptions
     assert not parsed.section # might be problematic
-    return parsed.parsed
+    return (parsed.parsed, parsed.search_keywords, parsed.is_deprecated)
 
 def parse_toplevel_desc(state: State, element: ET.Element):
-    # Verify that we didn't ignore any important info by accident
+    state.parsing_toplevel_desc = True
     parsed = parse_desc_internal(state, element)
-    assert not parsed.return_value
+    state.parsing_toplevel_desc = False
+    # Verify that we didn't ignore any important info by accident
+    assert not parsed.return_value and not parsed.return_values and not parsed.exceptions
     if parsed.params:
-        logging.warning("Use @tparam instead of @param for documenting class templates, @param is ignored")
-    return (parsed.parsed, parsed.templates, parsed.section[2] if parsed.section else '', parsed.footer_navigation)
+        logging.warning("{}: use @tparam instead of @param for documenting class templates, @param is ignored".format(state.current))
+    return (parsed.parsed, parsed.templates, parsed.section[2] if parsed.section else '', parsed.footer_navigation, parsed.example_navigation, parsed.search_keywords, parsed.is_deprecated)
 
 def parse_typedef_desc(state: State, element: ET.Element):
     # Verify that we didn't ignore any important info by accident
     parsed = parse_desc_internal(state, element.find('detaileddescription'))
     parsed.parsed += parse_desc(state, element.find('inbodydescription'))
-    assert not parsed.params and not parsed.return_value
+    assert not parsed.params and not parsed.return_value and not parsed.return_values and not parsed.exceptions
     assert not parsed.section # might be problematic
-    return (parsed.parsed, parsed.templates)
+    return (parsed.parsed, parsed.templates, parsed.search_keywords, parsed.is_deprecated)
 
 def parse_func_desc(state: State, element: ET.Element):
     # Verify that we didn't ignore any important info by accident
     parsed = parse_desc_internal(state, element.find('detaileddescription'))
     parsed.parsed += parse_desc(state, element.find('inbodydescription'))
     assert not parsed.section # might be problematic
-    return (parsed.parsed, parsed.templates, parsed.params, parsed.return_value)
+    return (parsed.parsed, parsed.templates, parsed.params, parsed.return_value, parsed.return_values, parsed.exceptions, parsed.search_keywords, parsed.is_deprecated)
 
 def parse_define_desc(state: State, element: ET.Element):
     # Verify that we didn't ignore any important info by accident
     parsed = parse_desc_internal(state, element.find('detaileddescription'))
     parsed.parsed += parse_desc(state, element.find('inbodydescription'))
-    assert not parsed.templates
+    assert not parsed.templates and not parsed.exceptions
+    assert not parsed.return_values # might be problematic?
     assert not parsed.section # might be problematic
-    return (parsed.parsed, parsed.params, parsed.return_value)
+    return (parsed.parsed, parsed.params, parsed.return_value, parsed.search_keywords, parsed.is_deprecated)
 
 def parse_inline_desc(state: State, element: ET.Element) -> str:
     if element is None: return ''
 
     # Verify that we didn't ignore any important info by accident
     parsed = parse_desc_internal(state, element, trim=False)
-    assert not parsed.templates and not parsed.params and not parsed.return_value
+    assert not parsed.templates and not parsed.params and not parsed.return_value and not parsed.return_values and not parsed.exceptions
     assert not parsed.section
     return parsed.parsed
 
@@ -904,12 +1444,12 @@ def parse_enum(state: State, element: ET.Element):
     assert element.tag == 'memberdef' and element.attrib['kind'] == 'enum'
 
     enum = Empty()
-    enum.id = extract_id(element)
+    enum.base_url, enum.id = parse_id(element)
     enum.type = parse_type(state, element.find('type'))
     enum.name = element.find('name').text
     if enum.name.startswith('@'): enum.name = '(anonymous)'
     enum.brief = parse_desc(state, element.find('briefdescription'))
-    enum.description = parse_desc(state, element.find('detaileddescription')) + parse_desc(state, element.find('inbodydescription'))
+    enum.description, search_keywords, search_enum_values_as_keywords, enum.is_deprecated = parse_enum_desc(state, element)
     enum.is_protected = element.attrib['prot'] == 'protected'
     enum.is_strong = False
     if 'strong' in element.attrib:
@@ -920,18 +1460,42 @@ def parse_enum(state: State, element: ET.Element):
     enumvalue: ET.Element
     for enumvalue in element.findall('enumvalue'):
         value = Empty()
-        value.id = extract_id(enumvalue)
+        # The base_url might be different than state.current_compound.url, but
+        # should be the same as enum.base_url
+        value_base_url, value.id = parse_id(enumvalue)
+        assert value_base_url == enum.base_url
         value.name = enumvalue.find('name').text
         # There can be an implicit initializer for enum value
         value.initializer = html.escape(enumvalue.findtext('initializer', ''))
         if ''.join(enumvalue.find('briefdescription').itertext()).strip():
-            logging.warning("Ignoring brief description of enum value {}::{}".format(enum.name, value.name))
-        value.description = parse_desc(state, enumvalue.find('detaileddescription'))
-        if value.description: enum.has_value_details = True
+            logging.warning("{}: ignoring brief description of enum value {}::{}".format(state.current, enum.name, value.name))
+        value.description, value_search_keywords, value.is_deprecated = parse_enum_value_desc(state, enumvalue)
+        if value.description:
+            enum.has_value_details = True
+            if enum.base_url == state.current_compound.url and not state.doxyfile['M_SEARCH_DISABLED']:
+                result = Empty()
+                result.flags = ResultFlag.ENUM_VALUE|(ResultFlag.DEPRECATED if value.is_deprecated else ResultFlag(0))
+                result.url = enum.base_url + '#' + value.id
+                result.prefix = state.current_prefix + [enum.name]
+                result.name = value.name
+                result.keywords = value_search_keywords
+                if search_enum_values_as_keywords and value.initializer.startswith('='):
+                    result.keywords += [(value.initializer[1:].lstrip(), '', 0)]
+                state.search += [result]
         enum.values += [value]
 
-    enum.has_details = enum.description or enum.has_value_details
-    return enum if enum.brief or enum.has_details or enum.has_value_details else None
+    enum.has_details = enum.base_url == state.current_compound.url and (enum.description or enum.has_value_details)
+    if enum.brief or enum.has_details or enum.has_value_details:
+        if enum.base_url == state.current_compound.url and not state.doxyfile['M_SEARCH_DISABLED']:
+            result = Empty()
+            result.flags = ResultFlag.ENUM|(ResultFlag.DEPRECATED if enum.is_deprecated else ResultFlag(0))
+            result.url = enum.base_url + '#' + enum.id
+            result.prefix = state.current_prefix
+            result.name = enum.name
+            result.keywords = search_keywords
+            state.search += [result]
+        return enum
+    return None
 
 def parse_template_params(state: State, element: ET.Element, description):
     if element is None: return False, None
@@ -966,7 +1530,7 @@ def parse_template_params(state: State, element: ET.Element, description):
 
     # Some param description got unused
     if description:
-        logging.warning("Template parameter description doesn't match parameter names: {}".format(repr(description)))
+        logging.warning("{}: template parameter description doesn't match parameter names: {}".format(state.current, repr(description)))
 
     return has_template_details, templates
 
@@ -974,28 +1538,39 @@ def parse_typedef(state: State, element: ET.Element):
     assert element.tag == 'memberdef' and element.attrib['kind'] == 'typedef'
 
     typedef = Empty()
-    typedef.id = extract_id(element)
+    typedef.base_url, typedef.id = parse_id(element)
     typedef.is_using = element.findtext('definition', '').startswith('using')
     typedef.type = parse_type(state, element.find('type'))
     typedef.args = parse_type(state, element.find('argsstring'))
     typedef.name = element.find('name').text
     typedef.brief = parse_desc(state, element.find('briefdescription'))
-    typedef.description, templates = parse_typedef_desc(state, element)
+    typedef.description, templates, search_keywords, typedef.is_deprecated = parse_typedef_desc(state, element)
     typedef.is_protected = element.attrib['prot'] == 'protected'
     typedef.has_template_details, typedef.templates = parse_template_params(state, element.find('templateparamlist'), templates)
 
-    typedef.has_details = typedef.description or typedef.has_template_details
-    return typedef if typedef.brief or typedef.has_details else None
+    typedef.has_details = typedef.base_url == state.current_compound.url and (typedef.description or typedef.has_template_details)
+    if typedef.brief or typedef.has_details:
+        # Avoid duplicates in search
+        if typedef.base_url == state.current_compound.url and not state.doxyfile['M_SEARCH_DISABLED']:
+            result = Empty()
+            result.flags = ResultFlag.TYPEDEF|(ResultFlag.DEPRECATED if typedef.is_deprecated else ResultFlag(0))
+            result.url = typedef.base_url + '#' + typedef.id
+            result.prefix = state.current_prefix
+            result.name = typedef.name
+            result.keywords = search_keywords
+            state.search += [result]
+        return typedef
+    return None
 
 def parse_func(state: State, element: ET.Element):
     assert element.tag == 'memberdef' and element.attrib['kind'] == 'function'
 
     func = Empty()
-    func.id = extract_id(element)
+    func.base_url, func.id = parse_id(element)
     func.type = parse_type(state, element.find('type'))
     func.name = fix_type_spacing(html.escape(element.find('name').text))
     func.brief = parse_desc(state, element.find('briefdescription'))
-    func.description, templates, params, func.return_value = parse_func_desc(state, element)
+    func.description, templates, params, func.return_value, func.return_values, func.exceptions, search_keywords, func.is_deprecated = parse_func_desc(state, element)
 
     # Extract function signature to prefix, suffix and various flags. Important
     # things affecting caller such as static or const (and rvalue overloads)
@@ -1054,12 +1629,17 @@ def parse_func(state: State, element: ET.Element):
         array = p.find('array')
         if array is not None:
             if name is not None:
-                assert param.type.endswith(')')
-                param.type = param.type[:-1] + name.text + ')' + array.text
+                if param.type.endswith(')'):
+                    param.type_name = param.type[:-1] + name.text + ')' + array.text
+                else:
+                    param.type_name = param.type + ' ' + name.text + array.text
             else:
-                param.type += array.text
+                param.type_name = param.type + array.text
+            param.type += array.text
         elif name is not None:
-            param.type += ' ' + name.text
+            param.type_name = param.type + ' ' + name.text
+        else:
+            param.type_name = param.type
 
         param.default = parse_type(state, p.find('defval'))
         if param.name in params:
@@ -1071,16 +1651,29 @@ def parse_func(state: State, element: ET.Element):
         func.params += [param]
 
     # Some param description got unused
-    if params: logging.warning("Function parameter description doesn't match parameter names: {}".format(repr(params)))
+    if params: logging.warning("{}: function parameter description doesn't match parameter names: {}".format(state.current, repr(params)))
 
-    func.has_details = func.description or func.has_template_details or func.has_param_details or func.return_value
-    return func if func.brief or func.has_details else None
+    func.has_details = func.base_url == state.current_compound.url and (func.description or func.has_template_details or func.has_param_details or func.return_value or func.return_values or func.exceptions)
+    if func.brief or func.has_details:
+        # Avoid duplicates in search
+        if func.base_url == state.current_compound.url and not state.doxyfile['M_SEARCH_DISABLED']:
+            result = Empty()
+            result.flags = ResultFlag.FUNC|(ResultFlag.DEPRECATED if func.is_deprecated else ResultFlag(0))|(ResultFlag.DELETED if func.is_deleted else ResultFlag(0))
+            result.url = func.base_url + '#' + func.id
+            result.prefix = state.current_prefix
+            result.name = func.name
+            result.keywords = search_keywords
+            result.params = [param.type for param in func.params]
+            result.suffix = func.suffix
+            state.search += [result]
+        return func
+    return None
 
 def parse_var(state: State, element: ET.Element):
     assert element.tag == 'memberdef' and element.attrib['kind'] == 'variable'
 
     var = Empty()
-    var.id = extract_id(element)
+    var.base_url, var.id = parse_id(element)
     var.type = parse_type(state, element.find('type'))
     if var.type.startswith('constexpr'):
         var.type = var.type[10:]
@@ -1092,20 +1685,30 @@ def parse_var(state: State, element: ET.Element):
     var.is_private = element.attrib['prot'] == 'private'
     var.name = element.find('name').text
     var.brief = parse_desc(state, element.find('briefdescription'))
-    var.description = parse_var_desc(state, element)
+    var.description, search_keywords, var.is_deprecated = parse_var_desc(state, element)
 
-    var.has_details = not not var.description
-    return var if var.brief or var.has_details else None
+    var.has_details = var.base_url == state.current_compound.url and var.description
+    if var.brief or var.has_details:
+        # Avoid duplicates in search
+        if var.base_url == state.current_compound.url and not state.doxyfile['M_SEARCH_DISABLED']:
+            result = Empty()
+            result.flags = ResultFlag.VAR|(ResultFlag.DEPRECATED if var.is_deprecated else ResultFlag(0))
+            result.url = var.base_url + '#' + var.id
+            result.prefix = state.current_prefix
+            result.name = var.name
+            result.keywords = search_keywords
+            state.search += [result]
+        return var
+    return None
 
 def parse_define(state: State, element: ET.Element):
     assert element.tag == 'memberdef' and element.attrib['kind'] == 'define'
 
     define = Empty()
-    define.id = extract_id(element)
+    define.id = extract_id_hash(state, element)
     define.name = element.find('name').text
     define.brief = parse_desc(state, element.find('briefdescription'))
-    define.description, params, define.return_value = parse_define_desc(state, element)
-
+    define.description, params, define.return_value, search_keywords, define.is_deprecated = parse_define_desc(state, element)
     define.has_param_details = False
     define.params = None
     for p in element.findall('param'):
@@ -1121,35 +1724,73 @@ def parse_define(state: State, element: ET.Element):
             define.params += [(name.text, description)]
 
     # Some param description got unused
-    if params: logging.warning("Define parameter description doesn't match parameter names: {}".format(repr(params)))
+    if params: logging.warning("{}: define parameter description doesn't match parameter names: {}".format(state.current, repr(params)))
 
     define.has_details = define.description or define.return_value
-    return define if define.brief or define.has_details else None
+    if define.brief or define.has_details:
+        if not state.doxyfile['M_SEARCH_DISABLED']:
+            result = Empty()
+            result.flags = ResultFlag.DEFINE|(ResultFlag.DEPRECATED if define.is_deprecated else ResultFlag(0))
+            result.url = state.current_compound.url + '#' + define.id
+            result.prefix = []
+            result.name = define.name
+            result.keywords = search_keywords
+            result.params = None if define.params is None else [param[0] for param in define.params]
+            state.search += [result]
+        return define
+    return None
 
 def extract_metadata(state: State, xml):
-    # index.xml will be parsed later in parse_index_xml()
-    if os.path.basename(xml) == 'index.xml': return
-
     logging.debug("Extracting metadata from {}".format(os.path.basename(xml)))
 
-    tree = ET.parse(xml)
+    try:
+        tree = ET.parse(xml)
+    except ET.ParseError as e:
+        logging.error("{}: XML parse error, skipping: {}".format(os.path.basename(xml), e))
+        return
+
     root = tree.getroot()
 
+    # We need just list of all example files in correct order, nothing else
+    if os.path.basename(xml) == 'index.xml':
+        for i in root:
+            if i.attrib['kind'] == 'example':
+                compound = Empty()
+                compound.id = i.attrib['refid']
+                compound.url = compound.id + '.html'
+                compound.name = i.find('name').text
+                state.examples += [compound]
+        return
+
     compounddef: ET.Element = root.find('compounddef')
-    if compounddef.attrib['kind'] not in ['namespace', 'class', 'struct', 'union', 'dir', 'file', 'page']:
+
+    if compounddef.attrib['kind'] not in ['namespace', 'group', 'class', 'struct', 'union', 'dir', 'file', 'page']:
         logging.debug("No useful info in {}, skipping".format(os.path.basename(xml)))
         return
 
     compound = Empty()
     compound.id  = compounddef.attrib['id']
     compound.kind = compounddef.attrib['kind']
-    # Compound name is page filename, so we have to use title there
-    compound.name = html.escape(compounddef.find('title').text if compound.kind == 'page' else compounddef.find('compoundname').text)
-    compound.url = compound.id + '.html'
+    # Compound name is page filename, so we have to use title there. The same
+    # is for groups.
+    compound.name = html.escape(compounddef.find('title').text if compound.kind in ['page', 'group'] and compounddef.findtext('title') else compounddef.find('compoundname').text)
+    # Compound URL is ID, except for index page
+    compound.url = (compounddef.find('compoundname').text if compound.kind == 'page' else compound.id) + '.html'
     compound.brief = parse_desc(state, compounddef.find('briefdescription'))
-    compound.has_details = compound.brief or compounddef.find('detaileddescription')
+    # Groups and pages are explicitly created so they *have details*, other
+    # things need to have at least some documentation
+    compound.has_details = compound.kind in ['group', 'page'] or compound.brief or compounddef.find('detaileddescription')
     compound.children = []
-    compound.parent = None # is filled in by build_tree()
+    compound.parent = None # is filled in by postprocess_state()
+
+    compound.is_deprecated = False
+    for i in compounddef.find('detaileddescription').findall('.//xrefsect'):
+        id = i.attrib['id']
+        match = xref_id_rx.match(id)
+        file = match.group(1)
+        if file.startswith('deprecated'):
+            compound.is_deprecated = True
+            break
 
     if compound.kind in ['class', 'struct', 'union']:
         # Fix type spacing
@@ -1173,10 +1814,13 @@ def extract_metadata(state: State, xml):
     elif compounddef.attrib['kind'] == 'page':
         for i in compounddef.findall('innerpage'):
             compound.children += [i.attrib['refid']]
+    elif compounddef.attrib['kind'] == 'group':
+        for i in compounddef.findall('innergroup'):
+            compound.children += [i.attrib['refid']]
 
     state.compounds[compound.id] = compound
 
-def build_tree(state: State):
+def postprocess_state(state: State):
     for _, compound in state.compounds.items():
         for child in compound.children:
             if child in state.compounds:
@@ -1184,7 +1828,7 @@ def build_tree(state: State):
 
     # Strip name of parent symbols from names to get leaf names
     for _, compound in state.compounds.items():
-        if not compound.parent or compound.kind in ['file', 'page']:
+        if not compound.parent or compound.kind in ['file', 'page', 'group']:
             compound.leaf_name = compound.name
             continue
 
@@ -1197,19 +1841,168 @@ def build_tree(state: State):
         # Strip parent dir from dir name
         elif compound.kind == 'dir':
             prefix = state.compounds[compound.parent].name + '/'
-            assert compound.name.startswith(prefix)
-            compound.leaf_name = compound.name[len(prefix):]
+            if compound.name.startswith(prefix):
+                compound.leaf_name = compound.name[len(prefix):]
+            else: # pragma: no cover
+                logging.warning("{}: potential issue: directory {} parent is not a prefix: {}".format(state.current, compound.name, prefix))
+                compound.leaf_name = compound.name
 
         # Other compounds are not in any index pages or breadcrumb, so leaf
         # name not needed
 
+    # Assign names and URLs to menu items
+    predefined = {
+        'pages': ("Pages", 'pages.html'),
+        'namespaces': ("Namespaces", 'namespaces.html'),
+        'modules': ("Modules", 'modules.html'),
+        'annotated': ("Classes", 'annotated.html'),
+        'files': ("Files", 'files.html')
+    }
+
+    def find(id):
+        # If predefined, return those
+        if id in predefined:
+            return predefined[id]
+
+        # Otherwise search in symbols
+        found = state.compounds[id]
+        return found.name, found.url
+
+    i: str
+    for var in 'M_LINKS_NAVBAR1', 'M_LINKS_NAVBAR2':
+        navbar_links = []
+        for i in state.doxyfile[var]:
+            links = i.split()
+            assert len(links)
+            sublinks = []
+            for sublink in links[1:]:
+                title, url = find(sublink)
+                sublinks += [(title, url, sublink)]
+            title, url = find(links[0])
+            navbar_links += [(title, url, links[0], sublinks)]
+
+        state.doxyfile[var] = navbar_links
+
+    # Guess MIME type of the favicon
+    if state.doxyfile['M_FAVICON']:
+        state.doxyfile['M_FAVICON'] = (state.doxyfile['M_FAVICON'], mimetypes.guess_type(state.doxyfile['M_FAVICON'])[0])
+
+def build_search_data(state: State, merge_subtrees=True, add_lookahead_barriers=True, merge_prefixes=True) -> bytearray:
+    trie = Trie()
+    map = ResultMap()
+
+    strip_tags_re = re.compile('<.*?>')
+    def strip_tags(text):
+        return strip_tags_re.sub('', text)
+
+    symbol_count = 0
+    for result in state.search:
+        # Decide on prefix joiner. Defines are among the :: ones as well,
+        # because we need to add the function macros twice -- but they have no
+        # prefix, so it's okay.
+        if result.flags & ResultFlag._TYPE in [ResultFlag.NAMESPACE, ResultFlag.CLASS, ResultFlag.STRUCT, ResultFlag.UNION, ResultFlag.TYPEDEF, ResultFlag.FUNC, ResultFlag.VAR, ResultFlag.ENUM, ResultFlag.ENUM_VALUE, ResultFlag.DEFINE]:
+            joiner = result_joiner = '::'
+        elif result.flags & ResultFlag._TYPE in [ResultFlag.DIR, ResultFlag.FILE]:
+            joiner = result_joiner = '/'
+        elif result.flags & ResultFlag._TYPE in [ResultFlag.PAGE, ResultFlag.GROUP]:
+            joiner = ''
+            result_joiner = ' » '
+        else:
+            assert False # pragma: no cover
+
+        # If just a leaf name, add it once
+        if not joiner:
+            assert result_joiner
+            result_name = result_joiner.join(result.prefix + [result.name])
+
+            # TODO: escape elsewhere so i don't have to unescape here
+            index = map.add(html.unescape(result_name), result.url, flags=result.flags)
+            trie.insert(html.unescape(result.name).lower(), index)
+
+        # Otherwise add it multiple times with all possible prefixes
+        else:
+            # Handle function arguments
+            name_with_args = result.name
+            name = result.name
+            suffix_length = 0
+            if hasattr(result, 'params') and result.params is not None:
+                # Some very heavily templated function parameters might cause
+                # the suffix_length to exceed 256, which won't fit into the
+                # serialized search data. However that *also* won't fit in the
+                # search result list so there's no point in storing so much.
+                # Truncate it to 65 chars which could fit at least a part of
+                # the function name in the list in most cases, yet be still
+                # long enough to be able to distinguish particular overloads.
+                # TODO: the suffix_length has to be calculated on UTF-8 and I
+                # am (un)escaping a lot back and forth here -- needs to be
+                # cleaned up
+                params = html.unescape(strip_tags(', '.join(result.params)))
+                if len(params) > 65:
+                    params = params[:64] + '…'
+                name_with_args += '(' + html.escape(params) + ')'
+                suffix_length += len(params.encode('utf-8')) + 2
+            if hasattr(result, 'suffix') and result.suffix:
+                name_with_args += result.suffix
+                # TODO: escape elsewhere so i don't have to unescape here
+                suffix_length += len(html.unescape(result.suffix))
+
+            # TODO: escape elsewhere so i don't have to unescape here
+            index = map.add(html.unescape(joiner.join(result.prefix + [name_with_args])), result.url, suffix_length=suffix_length, flags=result.flags)
+
+            # Add functions and function macros the second time with () appended,
+            # everything is the same except for suffix length which is 2 chars
+            # shorter
+            if hasattr(result, 'params') and result.params is not None:
+                index_args = map.add(html.unescape(joiner.join(result.prefix + [name_with_args])), result.url,
+                    suffix_length=suffix_length - 2, flags=result.flags)
+
+            prefixed_name = result.prefix + [name]
+            for i in range(len(prefixed_name)):
+                lookahead_barriers = []
+                name = ''
+                for j in prefixed_name[i:]:
+                    if name:
+                        lookahead_barriers += [len(name)]
+                        name += joiner
+                    name += html.unescape(j)
+                trie.insert(name.lower(), index, lookahead_barriers=lookahead_barriers if add_lookahead_barriers else [])
+
+                # Add functions and function macros the second time with ()
+                # appended, referencing the other result that expects () appended.
+                # The lookahead barrier is at the ( character to avoid the result
+                # being shown twice.
+                if hasattr(result, 'params') and result.params is not None:
+                    trie.insert(name.lower() + '()', index_args, lookahead_barriers=lookahead_barriers + [len(name)] if add_lookahead_barriers else [])
+
+        # Add keyword aliases for this symbol
+        for search, title, suffix_length in result.keywords:
+            if not title: title = search
+            keyword_index = map.add(title, '', alias=index, suffix_length=suffix_length)
+            trie.insert(search.lower(), keyword_index)
+
+        # Add this symbol and all its aliases to total symbol count
+        symbol_count += len(result.keywords) + 1
+
+    return serialize_search_data(trie, map, symbol_count, merge_subtrees=merge_subtrees, merge_prefixes=merge_prefixes)
+
+def base85encode_search_data(data: bytearray) -> bytearray:
+    return (b"/* Generated by http://mcss.mosra.cz/doxygen/. Do not edit. */\n" +
+            b"Search.load('" + base64.b85encode(data, True) + b"');\n")
+
 def parse_xml(state: State, xml: str):
     # Reset counter for unique math formulas
-    m.math.counter = 0
+    latex2svgextra.counter = 0
 
-    logging.info("Parsing {}".format(os.path.basename(xml)))
+    state.current = os.path.basename(xml)
 
-    tree = ET.parse(xml)
+    logging.debug("Parsing {}".format(state.current))
+
+    try:
+        tree = ET.parse(xml)
+    except ET.ParseError as e:
+        logging.error("{}: XML parse error, skipping: {}".format(state.current, e))
+        return
+
     root = tree.getroot()
     assert root.tag == 'doxygen'
 
@@ -1217,29 +2010,44 @@ def parse_xml(state: State, xml: str):
     assert compounddef.tag == 'compounddef'
     assert len([i for i in root]) == 1
 
-    # Ignoring private structs/classes, unnamed namespaces, files and
-    # directories that have absolute location (i.e., outside of the
-    # main source tree)
+    # Ignoring private structs/classes and unnamed namespaces
     if ((compounddef.attrib['kind'] in ['struct', 'class', 'union'] and compounddef.attrib['prot'] == 'private') or
-        (compounddef.attrib['kind'] == 'namespace' and '@' in compounddef.find('compoundname').text) or
-        (compounddef.attrib['kind'] in ['dir', 'file'] and os.path.isabs(compounddef.find('location').attrib['file']))):
-        logging.debug("only private things in {}, skipping".format(os.path.basename(xml)))
+        (compounddef.attrib['kind'] == 'namespace' and '@' in compounddef.find('compoundname').text)):
+        logging.debug("{}: only private things, skipping".format(state.current))
+        return None
+
+    # Ignoring compounds w/o any description, except for pages and groups,
+    # which are created explicitly
+    if not compounddef.find('briefdescription') and not compounddef.find('detaileddescription') and not compounddef.attrib['kind'] in ['page', 'group']:
+        logging.debug("{}: neither brief nor detailed description present, skipping".format(state.current))
         return None
 
     compound = Empty()
     compound.kind = compounddef.attrib['kind']
     compound.id = compounddef.attrib['id']
-    # Compound name is page filename, so we have to use title there
-    compound.name = compounddef.find('title').text if compound.kind == 'page' else compounddef.find('compoundname').text
+    # Compound name is page filename, so we have to use title there. The same
+    # is for groups.
+    compound.name = compounddef.find('title').text if compound.kind in ['page', 'group'] and compounddef.findtext('title') else compounddef.find('compoundname').text
+    # Compound URL is ID, except for index page, where it is named "indexpage"
+    # and so I have to override it back to "index". Can't use <compoundname>
+    # for pages because that doesn't reflect CASE_SENSE_NAMES. THANKS DOXYGEN.
+    compound.url_base = ('index' if compound.id == 'indexpage' else compound.id)
+    compound.url = compound.url_base + '.html'
+    # Save current compound URL for search data building and ID extraction
+    state.current_compound = compound
     compound.has_template_details = False
     compound.templates = None
     compound.brief = parse_desc(state, compounddef.find('briefdescription'))
-    compound.description, templates, compound.sections, footer_navigation = parse_toplevel_desc(state, compounddef.find('detaileddescription'))
+    compound.description, templates, compound.sections, footer_navigation, example_navigation, search_keywords, compound.is_deprecated = parse_toplevel_desc(state, compounddef.find('detaileddescription'))
+    compound.example_navigation = None
     compound.footer_navigation = None
+    compound.modules = []
     compound.dirs = []
     compound.files = []
     compound.namespaces = []
     compound.classes = []
+    compound.base_classes = []
+    compound.derived_classes = []
     compound.enums = []
     compound.typedefs = []
     compound.funcs = []
@@ -1265,8 +2073,9 @@ def parse_xml(state: State, xml: str):
     compound.has_var_details = False
     compound.has_define_details = False
 
-    # Build breadcrumb
-    if compound.kind in ['namespace', 'struct', 'class', 'union', 'file', 'dir', 'page']:
+    # Build breadcrumb. Breadcrumb for example pages is built after everything
+    # is parsed.
+    if compound.kind in ['namespace', 'group', 'struct', 'class', 'union', 'file', 'dir', 'page']:
         # Gather parent compounds
         path_reverse = [compound.id]
         while path_reverse[-1] in state.compounds and state.compounds[path_reverse[-1]].parent:
@@ -1277,6 +2086,11 @@ def parse_xml(state: State, xml: str):
         for i in reversed(path_reverse):
             compound.breadcrumb += [(state.compounds[i].leaf_name, state.compounds[i].url)]
 
+        # Save current prefix for search
+        state.current_prefix = [name for name, _ in compound.breadcrumb]
+    else:
+        state.current_prefix = []
+
     if compound.kind == 'page':
         # Drop TOC for pages, if not requested
         if compounddef.find('tableofcontents') is None:
@@ -1286,7 +2100,7 @@ def parse_xml(state: State, xml: str):
         if footer_navigation:
             up = state.compounds[compound.id].parent
 
-            # Go through all parent children and
+            # Go through all parent children and find previous and next
             if up:
                 up = state.compounds[up]
 
@@ -1332,6 +2146,7 @@ def parse_xml(state: State, xml: str):
                 f.url = file.url
                 f.name = file.leaf_name
                 f.brief = file.brief
+                f.is_deprecated = file.is_deprecated
 
                 if compounddef_child.tag == 'innerdir':
                     compound.dirs += [f]
@@ -1352,6 +2167,7 @@ def parse_xml(state: State, xml: str):
                     namespace.url = symbol.url
                     namespace.name = symbol.leaf_name if compound.kind == 'namespace' else symbol.name
                     namespace.brief = symbol.brief
+                    namespace.is_deprecated = symbol.is_deprecated
                     compound.namespaces += [namespace]
 
                 else:
@@ -1362,6 +2178,7 @@ def parse_xml(state: State, xml: str):
                     class_.url = symbol.url
                     class_.name = symbol.leaf_name if compound.kind in ['namespace', 'class', 'struct', 'union'] else symbol.name
                     class_.brief = symbol.brief
+                    class_.is_deprecated = symbol.is_deprecated
                     class_.templates = symbol.templates
 
                     # Put classes into the public/protected section for
@@ -1373,8 +2190,64 @@ def parse_xml(state: State, xml: str):
                             assert compounddef_child.attrib['prot'] == 'protected'
                             compound.protected_types += [('class', class_)]
                     else:
-                        assert compound.kind in ['namespace', 'file']
+                        assert compound.kind in ['namespace', 'group', 'file']
                         compound.classes += [class_]
+
+        # Base class (if it links to anywhere)
+        elif compounddef_child.tag == 'basecompoundref':
+            assert compound.kind in ['class', 'struct', 'union']
+
+            if 'refid' in compounddef_child.attrib:
+                id = compounddef_child.attrib['refid']
+
+                # Add it only if it's not private and we have documentation for it
+                if not compounddef_child.attrib['prot'] == 'private' and id in state.compounds and state.compounds[id].has_details:
+                    symbol = state.compounds[id]
+
+                    class_ = Empty()
+                    class_.kind = symbol.kind
+                    class_.url = symbol.url
+                    class_.name = symbol.leaf_name if state.compounds[compound.id].parent and symbol.parent.startswith(state.compounds[compound.id].parent) else symbol.name
+                    class_.brief = symbol.brief
+                    class_.templates = symbol.templates
+                    class_.is_deprecated = symbol.is_deprecated
+                    class_.is_protected = compounddef_child.attrib['prot'] == 'protected'
+                    class_.is_virtual = compounddef_child.attrib['virt'] == 'virtual'
+
+                    compound.base_classes += [class_]
+
+        # Derived class (if it links to anywhere)
+        elif compounddef_child.tag == 'derivedcompoundref':
+            assert compound.kind in ['class', 'struct', 'union']
+
+            if 'refid' in compounddef_child.attrib:
+                id = compounddef_child.attrib['refid']
+
+                # Add it only if it's not private and we have documentation for it
+                if not compounddef_child.attrib['prot'] == 'private' and id in state.compounds and state.compounds[id].has_details:
+                    symbol = state.compounds[id]
+
+                    class_ = Empty()
+                    class_.kind = symbol.kind
+                    class_.url = symbol.url
+                    class_.name = symbol.leaf_name if state.compounds[compound.id].parent and symbol.parent.startswith(state.compounds[compound.id].parent) else symbol.name
+                    class_.brief = symbol.brief
+                    class_.templates = symbol.templates
+                    class_.is_deprecated = symbol.is_deprecated
+
+                    compound.derived_classes += [class_]
+
+        # Module (*not* member group)
+        elif compounddef_child.tag == 'innergroup':
+            assert compound.kind == 'group'
+
+            group = state.compounds[compounddef_child.attrib['refid']]
+            g = Empty()
+            g.url = group.url
+            g.name = group.leaf_name
+            g.brief = group.brief
+            g.is_deprecated = group.is_deprecated
+            compound.modules += [g]
 
         # Other, grouped in sections
         elif compounddef_child.tag == 'sectiondef':
@@ -1540,7 +2413,7 @@ def parse_xml(state: State, xml: str):
                             compound.related += [('define', define)]
                             if define.has_details: compound.has_define_details = True
                     else: # pragma: no cover
-                        logging.warning("unknown related <memberdef> kind {}".format(memberdef.attrib['kind']))
+                        logging.warning("{}: unknown related <memberdef> kind {}".format(state.current, memberdef.attrib['kind']))
 
             elif compounddef_child.attrib['kind'] == 'user-defined':
                 list = []
@@ -1573,22 +2446,26 @@ def parse_xml(state: State, xml: str):
                             list += [('define', define)]
                             if define.has_details: compound.has_define_details = True
                     else: # pragma: no cover
-                        logging.warning("unknown user-defined <memberdef> kind {}".format(memberdef.attrib['kind']))
+                        logging.warning("{}: unknown user-defined <memberdef> kind {}".format(state.current, memberdef.attrib['kind']))
 
                 if list:
-                    group = Empty()
-                    group.name = compounddef_child.find('header').text
-                    group.id = slugify(group.name)
-                    group.description = parse_desc(state, compounddef_child.find('description'))
-                    group.members = list
-                    compound.groups += [group]
+                    header = compounddef_child.find('header')
+                    if header is None:
+                        logging.error("{}: member groups without @name are not supported, ignoring".format(state.current))
+                    else:
+                        group = Empty()
+                        group.name = header.text
+                        group.id = slugify(group.name)
+                        group.description = parse_desc(state, compounddef_child.find('description'))
+                        group.members = list
+                        compound.groups += [group]
 
             elif compounddef_child.attrib['kind'] not in ['private-type',
                                                           'private-static-func',
                                                           'private-static-attrib',
                                                           'private-attrib',
                                                           'friend']: # pragma: no cover
-                logging.warning("unknown <sectiondef> kind {}".format(compounddef_child.attrib['kind']))
+                logging.warning("{}: unknown <sectiondef> kind {}".format(state.current, compounddef_child.attrib['kind']))
 
         elif compounddef_child.tag == 'templateparamlist':
             compound.has_template_details, compound.templates = parse_template_params(state, compounddef_child, templates)
@@ -1606,8 +2483,8 @@ def parse_xml(state: State, xml: str):
                                             'collaborationgraph',
                                             'listofallmembers',
                                             'tableofcontents'] and
-            not (compounddef.attrib['kind'] == 'page' and compounddef_child.tag == 'title')): # pragma: no cover
-            logging.warning("Ignoring <{}> in <compounddef>".format(compounddef_child.tag))
+            not (compounddef.attrib['kind'] in ['page', 'group'] and compounddef_child.tag == 'title')): # pragma: no cover
+            logging.warning("{}: ignoring <{}> in <compounddef>".format(state.current, compounddef_child.tag))
 
     # Decide about the prefix (it may contain template parameters, so we
     # had to wait until everything is parsed)
@@ -1628,30 +2505,102 @@ def parse_xml(state: State, xml: str):
 
         compound.prefix_wbr += '::<wbr />'
 
+    # Example pages
+    if compound.kind == 'example':
+        # Build breadcrumb navigation
+        if example_navigation:
+            if not compound.name.startswith(example_navigation[1]): # pragma: no cover
+                logging.critical("{}: example filename is not prefixed with {}".format(state.current, example_navigation[1]))
+                assert False
+
+            prefix_length = len(example_navigation[1])
+
+            path_reverse = [example_navigation[0]]
+            while path_reverse[-1] in state.compounds and state.compounds[path_reverse[-1]].parent:
+                path_reverse += [state.compounds[path_reverse[-1]].parent]
+
+            # Fill breadcrumb with leaf names and URLs
+            compound.breadcrumb = []
+            for i in reversed(path_reverse):
+                compound.breadcrumb += [(state.compounds[i].leaf_name, state.compounds[i].url)]
+
+            # Add example filename as leaf item
+            compound.breadcrumb += [(compound.name[prefix_length:], compound.id + '.html')]
+
+            # Enable footer navigation, if requested
+            if footer_navigation:
+                up = state.compounds[example_navigation[0]]
+
+                prev = None
+                next = None
+                prev_child = None
+                for example in state.examples:
+                    if example.id == compound.id:
+                        if prev_child: prev = prev_child
+                    elif prev_child and prev_child.id == compound.id:
+                        if example.name.startswith(example_navigation[1]):
+                            next = example
+                        break
+
+                    if example.name.startswith(example_navigation[1]):
+                        prev_child = example
+
+                compound.footer_navigation = ((prev.url, prev.name[prefix_length:]) if prev else None,
+                                              (up.url, up.name),
+                                              (next.url, next.name[prefix_length:]) if next else None)
+
+        else:
+            compound.breadcrumb = [(compound.name, compound.id + '.html')]
+
+    # Add the compound to search data, if it's documented
+    # TODO: add example sources there? how?
+    if not state.doxyfile['M_SEARCH_DISABLED'] and not compound.kind == 'example' and (compound.kind == 'group' or compound.brief or compounddef.find('detaileddescription')):
+        if compound.kind == 'namespace':
+            kind = ResultFlag.NAMESPACE
+        elif compound.kind == 'struct':
+            kind = ResultFlag.STRUCT
+        elif compound.kind == 'class':
+            kind = ResultFlag.CLASS
+        elif compound.kind == 'union':
+            kind = ResultFlag.UNION
+        elif compound.kind == 'dir':
+            kind = ResultFlag.DIR
+        elif compound.kind == 'file':
+            kind = ResultFlag.FILE
+        elif compound.kind == 'page':
+            kind = ResultFlag.PAGE
+        elif compound.kind == 'group':
+            kind = ResultFlag.GROUP
+        else: assert False # pragma: no cover
+
+        result = Empty()
+        result.flags = kind|(ResultFlag.DEPRECATED if compound.is_deprecated else ResultFlag(0))
+        result.url = compound.url
+        result.prefix = state.current_prefix[:-1]
+        result.name = state.current_prefix[-1]
+        result.keywords = search_keywords
+        state.search += [result]
+
     parsed = Empty()
     parsed.version = root.attrib['version']
-
-    # Decide about save as filename. Pages mess this up, because index page has
-    # "indexpage" as a name so we have to use the compound name instead
-    parsed.save_as = (compounddef.find('compoundname').text if compound.kind == 'page' else compound.id) + '.html'
-
     parsed.compound = compound
     return parsed
 
 def parse_index_xml(state: State, xml):
-    logging.info("Parsing {}".format(os.path.basename(xml)))
+    logging.debug("Parsing {}".format(os.path.basename(xml)))
 
     tree = ET.parse(xml)
     root = tree.getroot()
     assert root.tag == 'doxygenindex'
 
     # Top-level symbols, files and pages. Separated to nestable (namespaces,
-    # dirs) and non-nestable so we have these listed first.
+    # groups, dirs) and non-nestable so we have these listed first.
     top_level_namespaces = []
     top_level_classes = []
     top_level_dirs = []
     top_level_files = []
     top_level_pages = []
+    top_level_modules = []
 
     # Non-top-level symbols, files and pages, assigned later
     orphans_nestable = {}
@@ -1678,12 +2627,15 @@ def parse_index_xml(state: State, xml):
         entry.url = compound.url
         entry.brief = compound.brief
         entry.children = []
+        entry.is_deprecated = compound.is_deprecated
         entry.has_nestable_children = False
 
         # If a top-level thing, put it directly into the list
         if not compound.parent:
             if compound.kind == 'namespace':
                 top_level_namespaces += [entry]
+            elif compound.kind == 'group':
+                top_level_modules += [entry]
             elif compound.kind in ['class', 'struct', 'union']:
                 top_level_classes += [entry]
             elif compound.kind == 'dir':
@@ -1692,13 +2644,13 @@ def parse_index_xml(state: State, xml):
                 top_level_files += [entry]
             else:
                 assert compound.kind == 'page'
-                # Ignore index page in page listing
-                if entry.id == 'indexpage': continue
-                top_level_pages += [entry]
+                # Ignore index page in page listing, add it later only if it
+                # has children
+                if entry.id != 'indexpage': top_level_pages += [entry]
 
         # Otherwise put it into orphan map
         else:
-            if compound.kind in ['namespace', 'dir']:
+            if compound.kind in ['namespace', 'group', 'dir']:
                 if not compound.parent in orphans_nestable:
                     orphans_nestable[compound.parent] = []
                 orphans_nestable[compound.parent] += [entry]
@@ -1724,6 +2676,7 @@ def parse_index_xml(state: State, xml):
     parsed.index.symbols = top_level_namespaces + top_level_classes
     parsed.index.files = top_level_dirs + top_level_files
     parsed.index.pages = top_level_pages
+    parsed.index.modules = top_level_modules
 
     # Assign nestable children to their parents first, if the parents exist
     for parent, children in orphans_nestable.items():
@@ -1743,21 +2696,21 @@ def parse_index_xml(state: State, xml):
     for parent, children in orphans.items():
         if parent in entries: entries[parent].children += children
 
+    # Add the index page if it has children
+    if 'indexpage' in entries and entries['indexpage'].children:
+        parsed.index.pages = [entries['indexpage']] + parsed.index.pages
+
     return parsed
 
 def parse_doxyfile(state: State, doxyfile, config = None):
-    logging.info("Parsing configuration from {}".format(doxyfile))
+    logging.debug("Parsing configuration from {}".format(doxyfile))
 
     comment_re = re.compile(r"""^\s*(#.*)?$""")
     variable_re = re.compile(r"""^\s*(?P<key>[A-Z0-9_@]+)\s*=\s*(?P<quote>['"]?)(?P<value>.*)(?P=quote)\s*(?P<backslash>\\?)$""")
     variable_continuation_re = re.compile(r"""^\s*(?P<key>[A-Z_]+)\s*\+=\s*(?P<quote>['"]?)(?P<value>.*)(?P=quote)\s*(?P<backslash>\\?)$""")
     continuation_re = re.compile(r"""^\s*(?P<quote>['"]?)(?P<value>.*)(?P=quote)\s*(?P<backslash>\\?)$""")
 
-    # Defaults so we don't fail with minimal Doxyfiles and also that the
-    # user-provided Doxygen can append to them. They are later converted to
-    # string or kept as a list based on type, so all have to be a list of
-    # strings now.
-    if not config: config = {
+    default_config = {
         'PROJECT_NAME': ['My Project'],
         'OUTPUT_DIRECTORY': [''],
         'XML_OUTPUT': ['xml'],
@@ -1771,8 +2724,27 @@ def parse_doxyfile(state: State, doxyfile, config = None):
         'M_FILE_TREE_EXPAND_LEVELS': ['1'],
         'M_EXPAND_INNER_TYPES': ['NO'],
         'M_THEME_COLOR': ['#22272e'],
-        'M_SHOW_DOXYGEN_VERSION': ['YES']
+        'M_FAVICON': ['favicon-dark.png'],
+        'M_LINKS_NAVBAR1': ['pages', 'namespaces'],
+        'M_LINKS_NAVBAR2': ['annotated', 'files'],
+        'M_PAGE_FINE_PRINT': ['[default]'],
+        'M_SEARCH_DISABLED': ['NO'],
+        'M_SEARCH_DOWNLOAD_BINARY': ['NO'],
+        'M_SEARCH_HELP': [
+"""Search for symbols, directories, files, pages or modules. You can omit any
+prefix from the symbol or file path; adding a <code>:</code> or <code>/</code>
+suffix lists all members of given symbol or directory. Navigate through the
+list using <span class="m-label m-dim">&darr;</span> and
+<span class="m-label m-dim">&uarr;</span>, press
+<span class="m-label m-dim">Enter</span> to go."""],
+        'M_SEARCH_EXTERNAL_URL': ['']
     }
+
+    # Defaults so we don't fail with minimal Doxyfiles and also that the
+    # user-provided Doxygen can append to them. They are later converted to
+    # string or kept as a list based on type, so all have to be a list of
+    # strings now.
+    if not config: config = copy.deepcopy(default_config)
 
     def parse_value(var):
         if var.group('quote') == '"':
@@ -1837,7 +2809,15 @@ def parse_doxyfile(state: State, doxyfile, config = None):
                 # only because coverage.py can't handle continue
                 continue # pragma: no cover
 
-            logging.warning("Umatchable line in Doxyfile: {}".format(line)) # pragma: no cover
+            logging.warning("{}: unmatchable line {}".format(doxyfile, line)) # pragma: no cover
+
+    # Some values are set to empty in the default-generated Doxyfile but they
+    # shouldn't be empty. Revert them to our defaults.
+    # TODO: this may behave strange in corner cases where multiple @INCLUDEd
+    # files set or append to the same thing
+    for i in ['HTML_EXTRA_STYLESHEET']:
+        if i in config and not config[i]:
+            config[i] = default_config[i]
 
     # String values that we want
     for i in ['PROJECT_NAME',
@@ -1847,7 +2827,10 @@ def parse_doxyfile(state: State, doxyfile, config = None):
               'XML_OUTPUT',
               'M_PAGE_HEADER',
               'M_PAGE_FINE_PRINT',
-              'M_THEME_COLOR']:
+              'M_THEME_COLOR',
+              'M_FAVICON',
+              'M_SEARCH_HELP',
+              'M_SEARCH_EXTERNAL_URL']:
         if i in config: state.doxyfile[i] = ' '.join(config[i])
 
     # Int values that we want
@@ -1856,22 +2839,31 @@ def parse_doxyfile(state: State, doxyfile, config = None):
         if i in config: state.doxyfile[i] = int(' '.join(config[i]))
 
     # Boolean values that we want
-    for i in ['M_EXPAND_INNER_TYPES',
-              'M_SHOW_DOXYGEN_VERSION']:
+    for i in ['CREATE_SUBDIRS',
+              'JAVADOC_AUTOBRIEF',
+              'M_EXPAND_INNER_TYPES',
+              'M_SEARCH_DISABLED',
+              'M_SEARCH_DOWNLOAD_BINARY']:
         if i in config: state.doxyfile[i] = ' '.join(config[i]) == 'YES'
 
     # List values that we want. Drop empty lines.
     for i in ['TAGFILES',
               'HTML_EXTRA_STYLESHEET',
-              'HTML_EXTRA_FILES']:
+              'HTML_EXTRA_FILES',
+              'M_LINKS_NAVBAR1',
+              'M_LINKS_NAVBAR2']:
         if i in config:
             state.doxyfile[i] = [line for line in config[i] if line]
 
-default_index_pages = ['pages', 'files', 'namespaces', 'annotated']
-default_wildcard = '*.xml'
-default_templates = 'templates/'
+    if state.doxyfile.get('CREATE_SUBDIRS', False):
+        logging.fatal("{}: CREATE_SUBDIRS is not supported, sorry. Disable it and try again.".format(doxyfile))
+        raise NotImplementedError
 
-def run(doxyfile, templates=default_templates, wildcard=default_wildcard, index_pages=default_index_pages):
+default_index_pages = ['pages', 'files', 'namespaces', 'modules', 'annotated']
+default_wildcard = '*.xml'
+default_templates = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'templates/')
+
+def run(doxyfile, templates=default_templates, wildcard=default_wildcard, index_pages=default_index_pages, search_add_lookahead_barriers=True, search_merge_subtrees=True, search_merge_prefixes=True, sort_globbed_files=False):
     state = State()
     state.basedir = os.path.dirname(doxyfile)
 
@@ -1880,6 +2872,10 @@ def run(doxyfile, templates=default_templates, wildcard=default_wildcard, index_
     xml_files_metadata = [os.path.join(xml_input, f) for f in glob.glob(os.path.join(xml_input, "*.xml"))]
     xml_files = [os.path.join(xml_input, f) for f in glob.glob(os.path.join(xml_input, wildcard))]
     html_output = os.path.join(state.basedir, state.doxyfile['OUTPUT_DIRECTORY'], state.doxyfile['HTML_OUTPUT'])
+
+    if sort_globbed_files:
+        xml_files_metadata.sort()
+        xml_files.sort()
 
     if not os.path.exists(html_output):
         os.makedirs(html_output)
@@ -1900,12 +2896,11 @@ def run(doxyfile, templates=default_templates, wildcard=default_wildcard, index_
     #   linking pages
     # - get URLs of namespace, classe, file docs and pages so we can link to
     #   them from breadcrumb navigation
-    logging.info("Parsing metadata from {} files".format(len(xml_files_metadata)))
     file: str
     for file in xml_files_metadata:
         extract_metadata(state, file)
 
-    build_tree(state)
+    postprocess_state(state)
 
     for file in xml_files:
         if os.path.basename(file) == 'index.xml':
@@ -1921,8 +2916,8 @@ def run(doxyfile, templates=default_templates, wildcard=default_wildcard, index_
                     **state.doxyfile)
 
                 output = os.path.join(html_output, file)
-                with open(output, 'w') as f:
-                    f.write(rendered)
+                with open(output, 'wb') as f:
+                    f.write(rendered.encode('utf-8'))
         else:
             parsed = parse_xml(state, file)
             if not parsed: continue
@@ -1930,17 +2925,55 @@ def run(doxyfile, templates=default_templates, wildcard=default_wildcard, index_
             template = env.get_template('{}.html'.format(parsed.compound.kind))
             rendered = template.render(compound=parsed.compound,
                 DOXYGEN_VERSION=parsed.version,
-                FILENAME=parsed.save_as,
+                FILENAME=parsed.compound.url,
                 **state.doxyfile)
 
-            output = os.path.join(html_output, parsed.save_as)
-            with open(output, 'w') as f:
-                f.write(rendered)
+            output = os.path.join(html_output, parsed.compound.url)
+            with open(output, 'wb') as f:
+                f.write(rendered.encode('utf-8'))
 
-    # Copy all referenced files, skip absolute URLs
-    for i in state.images + state.doxyfile['HTML_EXTRA_STYLESHEET'] + state.doxyfile['HTML_EXTRA_FILES']:
+    # Empty index page in case no mainpage documentation was provided so
+    # there's at least some entrypoint. Doxygen version is not set in this
+    # case, as this is totally without Doxygen involvement.
+    if not os.path.join(xml_input, 'indexpage.xml') in xml_files_metadata:
+        compound = Empty()
+        compound.kind = 'page'
+        compound.name = state.doxyfile['PROJECT_NAME']
+        compound.description = ''
+        compound.breadcrumb = [(state.doxyfile['PROJECT_NAME'], 'index.html')]
+        template = env.get_template('page.html')
+        rendered = template.render(compound=compound,
+            DOXYGEN_VERSION='0',
+            FILENAME='index.html',
+            **state.doxyfile)
+        output = os.path.join(html_output, 'index.html')
+        with open(output, 'wb') as f:
+            f.write(rendered.encode('utf-8'))
+
+    if not state.doxyfile['M_SEARCH_DISABLED']:
+        data = build_search_data(state, add_lookahead_barriers=search_add_lookahead_barriers, merge_subtrees=search_merge_subtrees, merge_prefixes=search_merge_prefixes)
+
+        if state.doxyfile['M_SEARCH_DOWNLOAD_BINARY']:
+            with open(os.path.join(html_output, "searchdata.bin"), 'wb') as f:
+                f.write(data)
+        else:
+            with open(os.path.join(html_output, "searchdata.js"), 'wb') as f:
+                f.write(base85encode_search_data(data))
+
+    # Copy all referenced files
+    for i in state.images + state.doxyfile['HTML_EXTRA_STYLESHEET'] + state.doxyfile['HTML_EXTRA_FILES'] + ([state.doxyfile['M_FAVICON'][0]] if state.doxyfile['M_FAVICON'] else []) + ([] if state.doxyfile['M_SEARCH_DISABLED'] else ['search.js']):
+        # Skip absolute URLs
         if urllib.parse.urlparse(i).netloc: continue
-        logging.info("copying {} to output".format(i))
+
+        # If file is found relative to the Doxyfile, use that
+        if os.path.exists(os.path.join(state.basedir, i)):
+            i = os.path.join(state.basedir, i)
+
+        # Otherwise use path relative to script directory
+        else:
+            i = os.path.join(os.path.dirname(os.path.realpath(__file__)), i)
+
+        logging.debug("copying {} to output".format(i))
         shutil.copy(i, os.path.join(html_output, os.path.basename(i)))
 
 if __name__ == '__main__': # pragma: no cover
@@ -1950,6 +2983,10 @@ if __name__ == '__main__': # pragma: no cover
     parser.add_argument('--wildcard', help="only process files matching the wildcard", default=default_wildcard)
     parser.add_argument('--index-pages', nargs='+', help="index page templates", default=default_index_pages)
     parser.add_argument('--no-doxygen', help="don't run Doxygen before", action='store_true')
+    parser.add_argument('--search-no-subtree-merging', help="don't merge search data subtrees", action='store_true')
+    parser.add_argument('--search-no-lookahead-barriers', help="don't insert search lookahead barriers", action='store_true')
+    parser.add_argument('--search-no-prefix-merging', help="don't merge search result prefixes", action='store_true')
+    parser.add_argument('--sort-globbed-files', help="sort globbed files for better reproducibility", action='store_true')
     parser.add_argument('--debug', help="verbose debug output", action='store_true')
     args = parser.parse_args()
 
@@ -1958,7 +2995,10 @@ if __name__ == '__main__': # pragma: no cover
     else:
         logging.basicConfig(level=logging.INFO)
 
-    if not args.no_doxygen:
-        subprocess.run(["doxygen", args.doxyfile], cwd=os.path.dirname(args.doxyfile))
+    # Make the Doxyfile path absolute, otherwise everything gets messed up
+    doxyfile = os.path.abspath(args.doxyfile)
 
-    run(args.doxyfile, args.templates, args.wildcard, args.index_pages)
+    if not args.no_doxygen:
+        subprocess.run(["doxygen", doxyfile], cwd=os.path.dirname(doxyfile))
+
+    run(doxyfile, os.path.abspath(args.templates), args.wildcard, args.index_pages, search_merge_subtrees=not args.search_no_subtree_merging, search_add_lookahead_barriers=not args.search_no_lookahead_barriers, search_merge_prefixes=not args.search_no_prefix_merging)

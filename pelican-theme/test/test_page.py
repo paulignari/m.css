@@ -1,7 +1,7 @@
 #
 #   This file is part of m.css.
 #
-#   Copyright © 2017 Vladimír Vondruš <mosra@centrum.cz>
+#   Copyright © 2017, 2018 Vladimír Vondruš <mosra@centrum.cz>
 #
 #   Permission is hereby granted, free of charge, to any person obtaining a
 #   copy of this software and associated documentation files (the "Software"),
@@ -111,6 +111,20 @@ class Landing(PageTestCase):
         self.assertEqual(*self.actual_expected_contents('page.html'))
         self.assertEqual(*self.actual_expected_contents('hide-navbar-brand.html'))
 
+class Cover(PageTestCase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(__file__, 'cover', *args, **kwargs)
+
+    def test(self):
+        self.run_pelican({
+            'STATIC_PATHS': ['ship.jpg'],
+            # Verify that the image is propagated to social meta tags
+            'M_DISABLE_SOCIAL_META_TAGS': False,
+        })
+
+        # Header and footer should be shown and should not break the layout
+        self.assertEqual(*self.actual_expected_contents('page.html'))
+
 class TitleSitenameAlias(PageTestCase):
     def __init__(self, *args, **kwargs):
         super().__init__(__file__, 'title_sitename_alias', *args, **kwargs)
@@ -134,6 +148,7 @@ class HtmlEscape(PageTestCase):
             'PAGE_URL': '{slug}.html?and&in&url=""',
             # The social meta tags should be escaped properly as well
             'M_DISABLE_SOCIAL_META_TAGS': False,
+            'M_FAVICON': ('favicon.ico?and&in&url=""', 'huh&what')
         })
 
         # Verify that everything is properly escaped everywhere. The landing
@@ -152,6 +167,7 @@ class HtmlEscape(PageTestCase):
             'PAGE_URL': '{slug}.html?and&in&url=""',
             # The social meta tags should be escaped properly as well
             'M_DISABLE_SOCIAL_META_TAGS': False,
+            'M_FAVICON': ('favicon.ico?and&in&url=""', 'huh&what')
         })
 
         # Verify that also the Pelican-produced content has correctly escaped

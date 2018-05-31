@@ -1,7 +1,7 @@
 ..
     This file is part of m.css.
 
-    Copyright © 2017 Vladimír Vondruš <mosra@centrum.cz>
+    Copyright © 2017, 2018 Vladimír Vondruš <mosra@centrum.cz>
 
     Permission is hereby granted, free of charge, to any person obtaining a
     copy of this software and associated documentation files (the "Software"),
@@ -373,9 +373,10 @@ will have negative margin to make its contents aligned with surrounding text.
 =================
 
 Use :css:`.m-text-left`, :css:`.m-text-right` or :css:`.m-text-center` to
-align text inside its parent element. See
-`Floating around <{filename}/css/grid.rst#floating-around>`_ in the grid system
-for aligning and floating blocks in a similar way.
+align text inside its parent element. Use :css:`.m-text-top`,
+:css:`.m-text-middle` and :css:`.m-text-bottom` to align text vertically for
+example in a table cell. See `Floating around <{filename}/css/grid.rst#floating-around>`_
+in the grid system for aligning and floating blocks in a similar way.
 
 `Padding`_
 ==========

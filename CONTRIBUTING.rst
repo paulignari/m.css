@@ -37,7 +37,7 @@ Code contribution
         /*
             This file is part of m.css.
 
-            Copyright © 2017 Vladimír Vondruš <mosra@centrum.cz>
+            Copyright © 2017, 2018 Vladimír Vondruš <mosra@centrum.cz>
             Copyright © YEAR YOUR_NAME <your@mail.com>
 
             Permission is hereby granted, free of charge, to any person obtaining a
@@ -53,14 +53,14 @@ On ArchLinux:
 
 .. code:: sh
 
-    sudo pacman -S texlive-most pelican python-pillow
+    sudo pacman -S texlive-most pelican python-pillow python-matplotlib
     cower -d python-pyphen # Build the python-pyphen package from AUR
 
 On Ubuntu you need these:
 
 .. code:: sh
 
-    sudo apt-get install texlive-base texlive-latex-extra texlive-fonts-extra
+    sudo apt-get install texlive-base texlive-latex-extra texlive-fonts-extra python3-matplotlib
     pip3 install pelican Pyphen Pillow
 
 Once you have all the dependencies, simply go to the ``site/`` subdirectory and
@@ -84,8 +84,8 @@ install Pelican from my local fork instead:
 Running tests
 =============
 
-Each bigger lump of Python code or Jinja2 template markup has tests. There are
-no visual tests for the CSS style at the moment. Run tests:
+Each bigger lump of Python code, Jinja2 template markup or JS code has tests.
+There are no visual tests for the CSS style at the moment. Run tests:
 
 .. code:: sh
 
@@ -97,15 +97,21 @@ no visual tests for the CSS style at the moment. Run tests:
 
     cd doxygen
     python -m unittest
+    node test/test-search.js
 
-Code coverage needs `coverage.py <https://coverage.readthedocs.io/>`_. There is
-no possibility of getting code coverage for Jinja2 templates, though.
+Code coverage needs `coverage.py <https://coverage.readthedocs.io/>`_ for
+Python and `istanbul <https://istanbul.js.org/>`_ for JS. There is no
+possibility of getting code coverage for Jinja2 templates, though.
 
 .. code:: sh
 
     cd doxygen
     coverage run -m unittest ; coverage html
     # open htmlcov/index.html in your browser
+
+    cd doxygen
+    node ./path/to/istanbul/lib/cli.js cover test/test-search.js
+    # open coverage/lcov-report/index.html in your browser
 
     cd pelican-plugins
     coverage run -m unittest ; coverage html
@@ -119,7 +125,7 @@ case of Doxygen, comment-out the line that removes the ``html`` directory in
 The project is built on Travis CI on Linux with Python 3.4, 3.5 and 3.6;
 Doxygen theme is tested only on 3.6 and math rendering is disabled as it's
 impossible to get it working on the old Ubuntu 14.04 LTS. Build status is over
-at https://travis-ci.org/mosra/m.css.
+at http://mcss.mosra.cz/build-status/.
 
 Contact
 =======

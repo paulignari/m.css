@@ -1,7 +1,7 @@
 ..
     This file is part of m.css.
 
-    Copyright © 2017 Vladimír Vondruš <mosra@centrum.cz>
+    Copyright © 2017, 2018 Vladimír Vondruš <mosra@centrum.cz>
 
     Permission is hereby granted, free of charge, to any person obtaining a
     copy of this software and associated documentation files (the "Software"),
@@ -352,40 +352,43 @@ without using those particular tags.
 
 To highlight important links such as file download, you can style them as
 buttons. Use :css:`.m-button` CSS class together with desired color class on an
-:html:`<a>` tag. The button is by default displayed as inline block, either
-wrap it in :css:`.m-text-center` etc. :html:`<div>` to make it centered or
-apply a :css:`.m-fullwidth` class to it to display it as a full-width block
-with center-aligned label.
+:html:`<a>` tag. Use :css:`.m-flat` instead of a color class to make the button
+flat. It is then styled similarly to a link, but with bigger padding around.
+The button is by default centered, apply a :css:`.m-fullwidth` class to it to
+display it as a full-width block with center-aligned label.
 
 .. code-figure::
 
     .. code:: html
 
-        <a class="m-button m-success" href="#">Success button</a>
+        <div class="m-button m-success m-fullwidth"><a href="#">Success button</a></div>
 
     .. raw:: html
 
         <div class="m-row">
           <div class="m-col-m-3 m-col-s-6">
-            <a class="m-button m-default m-fullwidth" href="#">Default button</a>
+            <div class="m-button m-default m-fullwidth"><a href="#">Default button</a></div>
           </div>
           <div class="m-col-m-3 m-col-s-6">
-            <a class="m-button m-primary m-fullwidth" href="#">Primary button</a>
+            <div class="m-button m-primary m-fullwidth"><a href="#">Primary button</a></div>
           </div>
           <div class="m-col-m-3 m-col-s-6">
-            <a class="m-button m-success m-fullwidth" href="#">Success button</a>
+            <div class="m-button m-success m-fullwidth"><a href="#">Success button</a></div>
           </div>
           <div class="m-col-m-3 m-col-s-6">
-            <a class="m-button m-warning m-fullwidth" href="#">Warning button</a>
+            <div class="m-button m-warning m-fullwidth"><a href="#">Warning button</a></div>
           </div>
           <div class="m-col-m-3 m-col-s-6">
-            <a class="m-button m-danger m-fullwidth" href="#">Danger button</a>
+            <div class="m-button m-danger m-fullwidth"><a href="#">Danger button</a></div>
           </div>
           <div class="m-col-m-3 m-col-s-6">
-            <a class="m-button m-info m-fullwidth" href="#">Info button</a>
+            <div class="m-button m-info m-fullwidth"><a href="#">Info button</a></div>
           </div>
           <div class="m-col-m-3 m-col-s-6">
-            <a class="m-button m-dim m-fullwidth" href="#">Dim button</a>
+            <div class="m-button m-dim m-fullwidth"><a href="#">Dim button</a></div>
+          </div>
+          <div class="m-col-m-3 m-col-s-6">
+            <div class="m-button m-flat m-fullwidth"><a href="#">Flat button</a></div>
           </div>
         </div>
 
@@ -396,8 +399,8 @@ class inside the :html:`<a>` to achieve the following effect:
 
     .. code:: html
 
-        <div class="m-text-center">
-          <a class="m-button m-primary" href="#">
+        <div class="m-button m-primary">
+          <a href="#">
             <div class="m-big">Download the thing</div>
             <div class="m-small">Any platform, 5 kB.</div>
           </a>
@@ -405,8 +408,8 @@ class inside the :html:`<a>` to achieve the following effect:
 
     .. raw:: html
 
-        <div class="m-text-center">
-          <a class="m-button m-primary" href="#">
+        <div class="m-button m-primary">
+          <a href="#">
             <div class="m-big">Download the thing</div>
             <div class="m-small">Any platform, 5 kB.</div>
           </a>
@@ -517,9 +520,10 @@ bold, all :html:`<th>` and :html:`<td>` are aligned to left while table
         </table>
 
 Rows are highlighted on hover, if you want to disable that, put :css:`.m-flat`
-CSS class on the :html:`<table>` element. Similarly to other components, you
-can color particular :html:`<tr>` or :html:`<td>` elements using the color
-classes from above:
+CSS class on the :html:`<table>` element. You can also put :css:`.m-thin` onto
+:html:`<th>` elements to remove the bold styling. Similarly to other
+components, you can color particular :html:`<tr>` or :html:`<td>` elements
+using the color classes from above:
 
 .. raw:: html
 
@@ -591,6 +595,9 @@ classes from above:
       </tbody>
     </table></div>
 
+Mark the table with :html:`.m-big` to inflate it with more spacing, for example
+when designing a high-level product category overview.
+
 Similarly to `lists <{filename}/css/typography.rst#lists-diaries>`_, if using
 :html:`<p>` elements inside :html:`<td>`, they are neither indented nor
 justified.
@@ -598,10 +605,10 @@ justified.
 `Images`_
 =========
 
-Putting :css:`.m-image` class onto the :html:`<img>` tag makes it centered,
-slightly rounded and sets its max width to 100%. Adding :css:`.m-fullwidth` on
-the image element works as expected. For accessibility reasons it's a good
-practice to include the ``alt`` attribute.
+Putting :css:`.m-image` class onto an :html:`<img>` / :html:`<svg>` tag makes
+the image centered, slightly rounded and sets its max width to 100%. Adding
+:css:`.m-fullwidth` on the image element works as expected. For accessibility
+reasons it's a good practice to include the ``alt`` attribute.
 
 .. code-figure::
 
@@ -652,6 +659,8 @@ wrapped in some tag as well (for example a :html:`<span>`). The
 Figure always expects at least the caption to be present. If you want just an
 image, use the plain image tag. If you have a lot of figures on the page and
 the border is distracting, apply the :css:`.m-flat` class to hide it.
+Optionally you can color the figure border and caption by adding one of the
+`CSS color classes <#colors>`_ to the :html:`<figure>` element.
 
 .. code-figure::
 
@@ -1054,6 +1063,47 @@ the ``depth`` value returned on stderr can be taken as a base for the
     `Pelican Math plugin <{filename}/plugins/math-and-code.rst#math>`__
     integrates LaTeX math directly into your :abbr:`reST <reStructuredText>`
     markup for convenient content authoring.
+
+`Plots`_
+========
+
+Wrap a :html:`<svg>` element in a :html:`<div class="m-plot">` to make it
+centered and occupying full width. Mark plot axes background with
+:css:`.m-background`, bars can be styled using :css:`.m-bar` and a
+corresponding `CSS color class <#colors>`_. Mark ticks and various other lines
+with :css:`.m-line`, error bars with :css:`.m-error`. Use
+:html:`<text class="m-label">` for tick and axes labels and
+:html:`<text class="m-title">` for graph title.
+
+.. code-figure::
+
+    .. code:: html
+
+        <div class="m-plot"><svg>
+          <path d="M 68.22875 70.705312 ..." class="m-background"/>
+          <path d="M 68.22875 29.116811 ..." class="m-bar m-warning"/>
+          <path d="M 68.22875 51.121309 ..." class="m-bar m-primary"/>
+          ...
+          <defs><path d="..." id="mba4ce04b6c" class="m-line"/></defs>
+          <use x="68.22875" xlink:href="#mba4ce04b6c" y="37.91861"/>
+          <text class="m-label" style="text-anchor:end;" ...>Cheetah</text>
+          ...
+          <path d="M 428.616723 37.91861 ..." class="m-error"/>
+          ...
+          <text class="m-title" style="text-anchor:middle;" ...>Fastest animals</text>
+        </svg></div>
+
+    .. container:: m-plot
+
+        .. raw:: html
+            :file: components-plot.svg
+
+.. note-success::
+
+    Plot styling is designed to be used with extenal tools, for example Python
+    Matplotlib. If you use Pelican, m.css has a `Plots <{filename}/plugins/plots.rst>`__
+    plugin that allows you to produce plots using :rst:`.. plot::` directives
+    directly in your :abbr:`reST <reStructuredText>` markup.
 
 `Padding`_
 ==========

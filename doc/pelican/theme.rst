@@ -1,7 +1,7 @@
 ..
     This file is part of m.css.
 
-    Copyright © 2017 Vladimír Vondruš <mosra@centrum.cz>
+    Copyright © 2017, 2018 Vladimír Vondruš <mosra@centrum.cz>
 
     Permission is hereby granted, free of charge, to any person obtaining a
     copy of this software and associated documentation files (the "Software"),
@@ -102,6 +102,9 @@ If you would want to use the light theme instead, the configuration is this
     and plugins are prefixed with ``M_``. Configuration variables without
     prefix are builtin Pelican options.
 
+If you see something unexpected or not see something expected, check the
+`Troubleshooting`_ section below.
+
 `Configuration`_
 ================
 
@@ -123,6 +126,19 @@ can be either absolute or relative to :py:`SITEURL`. If :py:`M_BLOG_NAME` /
 
     M_BLOG_NAME = 'Your Brand Blog'
     M_BLOG_URL = 'blog/'
+
+The :py:`M_FAVICON` setting, if present, is used to specify contents of the
+:html:`<link rel="icon">` tag. It's a tuple of :py:`(url, type)` where
+:py:`url` is favicon URL and :py:`type` is its corresponding MIME type. If
+:py:`M_BLOG_FAVICON` is specified, it's overriding :py:`M_FAVICON` on blog-like
+pages (articles, article listing... basically everything except pages). If
+:py:`M_BLOG_FAVICON` is not specified, :py:`M_FAVICON` is used everywhere; if
+neither is specified no :html:`<link>` tag is rendered. Example configuration:
+
+.. code:: py
+
+    M_FAVICON = ('favicon.ico', 'image/x-ico')
+    M_BLOG_FAVICON = ('favicon-blog.png', 'image/png')
 
 `Top navbar`_
 -------------
@@ -425,6 +441,20 @@ destination and URL.
 
     You can see the landing page in action on the `main project page <{filename}/index.rst>`_.
 
+`Pages with cover image`_
+-------------------------
+
+Besides full-blown landing pages that give you control over the whole layout,
+you can add cover images to regular pages by just specifying the :rst:`:cover:`
+field but omitting the :rst:`:landing:` field. See corresponding section
+`in the CSS page layout docs <{filename}/css/page-layout.rst#pages-with-cover-image>`_
+for details about how the cover image affects page layout.
+
+.. note-info::
+
+    Real-world example of a page with cover image can be seen on the
+    `Magnum Engine website <http://magnum.graphics/features/extensions/>`_.
+
 `Page header and footer`_
 -------------------------
 
@@ -466,7 +496,27 @@ above:
 
     The :rst:`:header:` field is not supported on `landing pages`_. In case
     both :rst:`:landing:` and :rst:`:header:` is present, :rst:`:header:` is
-    ignored.
+    ignored. However, it works as expected if just :rst:`:cover:` is present.
+
+`News on index page`_
+---------------------
+
+If you override the index page to a custom landing page, by default you lose
+the list of latest articles. That might cause the website to appear stale when
+you update just the blog. In order to fix that, it's possible to show a block
+with latest articles on the index page using the :py:`M_NEWS_ON_INDEX` setting.
+It's a tuple of :py:`(title, count)` where :py:`title` is the block header
+title that acts as a link to :py:`M_BLOG_URL` and :py:`count` is the max number
+of articles shown. Example configuration:
+
+.. code:: py
+
+    M_NEWS_ON_INDEX = ("Latest news on our blog", 3)
+
+.. note-success::
+
+    You can see how this block looks on the Magnum Engine main page:
+    http://magnum.graphics
 
 `(Social) meta tags for pages`_
 -------------------------------
@@ -597,6 +647,26 @@ invert text color on cover, add a :rst:`:class:` field containing the
     You can compare how an article with nearly the same contents looks as
     `a normal article <{filename}/examples/article.rst>`_ and a
     `jumbo article <{filename}/examples/jumbo-article.rst>`_.
+
+`Archived articles`_
+--------------------
+
+It's possible to mark articles and archived by setting the :rst:`:archived:`
+field to :py:`True`. In addition to that, you can display an arbitrary
+formatted block on the article page on top of article contents right below the
+summary. The content of the block is controlled by the
+:py:`M_ARCHIVED_ARTICLE_BADGE` setting, containinig
+:abbr:`reST <reStructuredText>`-formatted markup. The ``{year}`` placeholder,
+if present, is replaced with the article year. If the setting is not present,
+no block is rendered at all. Example setting:
+
+.. code:: py
+
+    M_ARCHIVED_ARTICLE_BADGE = """
+    .. container:: m-note m-warning
+
+        This article is from {year}. **It's old.** Deal with it.
+    """
 
 `(Social) meta tags for articles`_
 ----------------------------------
@@ -738,3 +808,14 @@ is valid HTML5 and should be parsable as XML.
 
     This is one of the main goals of this project. Please
     :gh:`report a bug <mosra/m.css/issues/new>` if it's not like that.
+
+`Troubleshooting`_
+==================
+
+`Output is missing styling`_
+----------------------------
+
+If you are on Windows and don't have Git symlinks enabled, empty CSS files
+might get copied. The solution is either to reinstall Git with symlinks enabled
+or manually copy all ``*.css`` files from ``css/`` to
+``pelican-theme/static/``, replacing the broken symlinks present there.

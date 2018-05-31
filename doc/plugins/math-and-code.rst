@@ -1,7 +1,7 @@
 ..
     This file is part of m.css.
 
-    Copyright © 2017 Vladimír Vondruš <mosra@centrum.cz>
+    Copyright © 2017, 2018 Vladimír Vondruš <mosra@centrum.cz>
 
     Permission is hereby granted, free of charge, to any person obtaining a
     copy of this software and associated documentation files (the "Software"),
@@ -30,7 +30,7 @@ Math and code
     .. note-dim::
         :class: m-text-center
 
-        `« Images <{filename}/plugins/images.rst>`_ | `Pelican plugins <{filename}/plugins.rst>`_ | `Links » <{filename}/plugins/links.rst>`_
+        `« Images <{filename}/plugins/images.rst>`_ | `Pelican plugins <{filename}/plugins.rst>`_ | `Plots » <{filename}/plugins/plots.rst>`_
 
 .. role:: css(code)
     :language: css
@@ -145,6 +145,23 @@ want to add additional CSS classes, derive a custom role from it.
 
     Quaternion-conjugated dual quaternion is :math-info:`\hat q^* = q_0^* + q_\epsilon^*`,
     while dual-conjugation gives :math:`\overline{\hat q} = q_0 - \epsilon q_\epsilon`.
+
+.. note-info::
+
+    LaTeX can be sometimes a real pain to set up. In order to make it possible
+    to work on sites that use the :py:`m.math` plugin on machines without LaTeX
+    installed, you can enable a fallback option to render all math as code
+    blocks using the :py:`M_MATH_RENDER_AS_CODE` setting. That can be, for
+    example, combined with a check for presence of the LaTeX binary:
+
+    .. code:: py
+
+        import shutil
+        import logging
+
+        if not shutil.which('latex'):
+            logging.warning("LaTeX not found, fallback to rendering math as code")
+            M_MATH_RENDER_AS_CODE = True
 
 `Code`_
 =======

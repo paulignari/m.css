@@ -1,7 +1,7 @@
 #
 #   This file is part of m.css.
 #
-#   Copyright © 2017 Vladimír Vondruš <mosra@centrum.cz>
+#   Copyright © 2017, 2018 Vladimír Vondruš <mosra@centrum.cz>
 #
 #   Permission is hereby granted, free of charge, to any person obtaining a
 #   copy of this software and associated documentation files (the "Software"),
@@ -24,11 +24,12 @@
 
 import os
 import shutil
+import subprocess
 import unittest
 
 from distutils.version import LooseVersion
 
-from test import IntegrationTestCase, doxygen_version
+from . import BaseTestCase, IntegrationTestCase, doxygen_version
 
 class Typography(IntegrationTestCase):
     def __init__(self, *args, **kwargs):
@@ -47,17 +48,10 @@ class Blocks(IntegrationTestCase):
         super().__init__(__file__, 'blocks', *args, **kwargs)
 
     def test(self):
-        self.run_dox2html5(wildcard='indexpage.xml')
+        self.run_dox2html5(wildcard='*.xml')
         self.assertEqual(*self.actual_expected_contents('index.html'))
-
-    def test_xrefpages(self):
-        self.run_dox2html5(wildcard='todo.xml')
         self.assertEqual(*self.actual_expected_contents('todo.html'))
-
-    def test_builtin_xrefitem_merging(self):
-        # Multiple xrefitems should be merged into one here
-        self.run_dox2html5(wildcard='File_8h.xml')
-        self.run_dox2html5(wildcard='old.xml')
+        # Multiple xrefitems should be merged into one
         self.assertEqual(*self.actual_expected_contents('File_8h.html'))
         self.assertEqual(*self.actual_expected_contents('old.html'))
 
@@ -118,6 +112,12 @@ class Math(IntegrationTestCase):
         self.run_dox2html5(wildcard='indexpage.xml')
         self.assertEqual(*self.actual_expected_contents('index.html'))
 
+    @unittest.skipUnless(shutil.which('latex'),
+                         "Math rendering requires LaTeX installed")
+    def test_latex_error(self):
+        with self.assertRaises(subprocess.CalledProcessError) as context:
+            self.run_dox2html5(wildcard='error.xml')
+
 class Tagfile(IntegrationTestCase):
     def __init__(self, *args, **kwargs):
         super().__init__(__file__, 'tagfile', *args, **kwargs)
@@ -140,7 +140,55 @@ class Custom(IntegrationTestCase):
         self.run_dox2html5(wildcard='math.xml')
         self.assertEqual(*self.actual_expected_contents('math.html'))
 
-    def test_footer_navigation(self):
-        self.run_dox2html5(wildcard='subpage*.xml')
-        self.assertEqual(*self.actual_expected_contents('subpage1.html'))
-        self.assertEqual(*self.actual_expected_contents('subpage2.html'))
+class ParseError(BaseTestCase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(__file__, 'parse_error', *args, **kwargs)
+
+    def test(self):
+        self.run_dox2html5(wildcard='broken.xml')
+
+        # The index file should be generated, no abort
+        self.assertTrue(os.path.exists(os.path.join(self.path, 'html', 'index.html')))
+
+# JAVADOC_AUTOBRIEF should be nuked from orbit. Or implemented from scratch,
+# properly.
+
+class AutobriefHr(IntegrationTestCase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(__file__, 'autobrief_hr', *args, **kwargs)
+
+    def test(self):
+        self.run_dox2html5(wildcard='namespaceNamespace.xml')
+        self.assertEqual(*self.actual_expected_contents('namespaceNamespace.html'))
+
+class AutobriefMultiline(IntegrationTestCase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(__file__, 'autobrief_multiline', *args, **kwargs)
+
+    def test(self):
+        self.run_dox2html5(wildcard='namespaceNamespace.xml')
+        self.assertEqual(*self.actual_expected_contents('namespaceNamespace.html'))
+
+class AutobriefHeading(IntegrationTestCase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(__file__, 'autobrief_heading', *args, **kwargs)
+
+    def test(self):
+        self.run_dox2html5(wildcard='namespaceNamespace.xml')
+        self.assertEqual(*self.actual_expected_contents('namespaceNamespace.html'))
+
+class SectionUnderscoreOne(IntegrationTestCase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(__file__, 'section_underscore_one', *args, **kwargs)
+
+    def test(self):
+        self.run_dox2html5(wildcard='indexpage.xml')
+        self.assertEqual(*self.actual_expected_contents('index.html'))
+
+class SectionInFunction(IntegrationTestCase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(__file__, 'section_in_function', *args, **kwargs)
+
+    def test(self):
+        self.run_dox2html5(wildcard='File_8h.xml')
+        self.assertEqual(*self.actual_expected_contents('File_8h.html'))
