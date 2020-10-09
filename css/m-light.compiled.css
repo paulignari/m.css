@@ -3,7 +3,7 @@
 /*
     This file is part of m.css.
 
-    Copyright © 2017, 2018, 2019 Vladimír Vondruš <mosra@centrum.cz>
+    Copyright © 2017, 2018, 2019, 2020 Vladimír Vondruš <mosra@centrum.cz>
 
     Permission is hereby granted, free of charge, to any person obtaining a
     copy of this software and associated documentation files (the "Software"),
@@ -421,6 +421,9 @@ mark {
   padding: 0.0625rem;
   background-color: #e6e69c;
   color: #4c93d3;
+}
+.m-link-wrap {
+  word-break: break-all;
 }
 pre, code {
   font-family: 'Source Code Pro', monospace, monospace, monospace;
@@ -895,6 +898,9 @@ figure.m-figure figcaption, .m-code-figure figcaption, .m-console-figure figcapt
   font-weight: normal;
   font-size: 1.17rem;
 }
+figure.m-figure figcaption a, .m-code-figure figcaption a, .m-console-figure figcaption a {
+  text-decoration: none;
+}
 .m-imagegrid > div {
   background-color: #ffffff;
 }
@@ -1258,7 +1264,7 @@ figure.m-figure:not(.m-flat) > svg.m-graph:first-child {
   color: #949494;
 }
 .m-block.m-flat { border-color: transparent; }
-.m-block.m-flat h3, .m-block.m-flat h4, .m-block.m-flat h5. .m-block.m-flat h6 {
+.m-block.m-flat h3, .m-block.m-flat h4, .m-block.m-flat h5, .m-block.m-flat h6 {
   color: #000000;
 }
 .m-block.m-default h3 a:hover, .m-block.m-default h3 a:focus, .m-block.m-default h3 a:active,
@@ -2478,24 +2484,41 @@ article:last-child, article section:last-child { margin-bottom: 0; }
 }
 
 .m-console .hll { background-color: #ffffcc }
-.m-console .g-AnsiBlack { color: #000000 }
-.m-console .g-AnsiBlue { color: #3f3fd1 }
-.m-console .g-AnsiBrightBlack { color: #686868; font-weight: bold }
-.m-console .g-AnsiBrightBlue { color: #5454ff; font-weight: bold }
-.m-console .g-AnsiBrightCyan { color: #54ffff; font-weight: bold }
+.m-console .g-AnsiBackgroundBlack { background-color: #232627 }
+.m-console .g-AnsiBackgroundBlue { background-color: #1d99f3 }
+.m-console .g-AnsiBackgroundBrightBlack { background-color: #7f8c8d }
+.m-console .g-AnsiBackgroundBrightBlue { background-color: #3daee9 }
+.m-console .g-AnsiBackgroundBrightCyan { background-color: #16a085 }
+.m-console .g-AnsiBackgroundBrightGreen { background-color: #1cdc9a }
+.m-console .g-AnsiBackgroundBrightMagenta { background-color: #8e44ad }
+.m-console .g-AnsiBackgroundBrightRed { background-color: #c0392b }
+.m-console .g-AnsiBackgroundBrightWhite { background-color: #ffffff }
+.m-console .g-AnsiBackgroundBrightYellow { background-color: #fdbc4b }
+.m-console .g-AnsiBackgroundCyan { background-color: #1abc9c }
+.m-console .g-AnsiBackgroundDefault { background-color: #fcfcfc }
+.m-console .g-AnsiBackgroundGreen { background-color: #11d116 }
+.m-console .g-AnsiBackgroundMagenta { background-color: #9b59b6 }
+.m-console .g-AnsiBackgroundRed { background-color: #ed1515 }
+.m-console .g-AnsiBackgroundWhite { background-color: #fcfcfc }
+.m-console .g-AnsiBackgroundYellow { background-color: #f67400 }
+.m-console .g-AnsiBlack { color: #232627 }
+.m-console .g-AnsiBlue { color: #1d99f3 }
+.m-console .g-AnsiBrightBlack { color: #7f8c8d; font-weight: bold }
+.m-console .g-AnsiBrightBlue { color: #3daee9; font-weight: bold }
+.m-console .g-AnsiBrightCyan { color: #16a085; font-weight: bold }
 .m-console .g-AnsiBrightDefault { color: #ffffff; font-weight: bold }
-.m-console .g-AnsiBrightGreen { color: #54ff54; font-weight: bold }
-.m-console .g-AnsiBrightMagenta { color: #ff54ff; font-weight: bold }
-.m-console .g-AnsiBrightRed { color: #ff5454; font-weight: bold }
+.m-console .g-AnsiBrightGreen { color: #1cdc9a; font-weight: bold }
+.m-console .g-AnsiBrightMagenta { color: #8e44ad; font-weight: bold }
+.m-console .g-AnsiBrightRed { color: #c0392b; font-weight: bold }
 .m-console .g-AnsiBrightWhite { color: #ffffff; font-weight: bold }
-.m-console .g-AnsiBrightYellow { color: #ffff54; font-weight: bold }
-.m-console .g-AnsiCyan { color: #18b2b2 }
-.m-console .g-AnsiDefault { color: #b2b2b2 }
-.m-console .g-AnsiGreen { color: #18b218 }
-.m-console .g-AnsiMagenta { color: #b218b2 }
-.m-console .g-AnsiRed { color: #b21818 }
-.m-console .g-AnsiWhite { color: #b2b2b2 }
-.m-console .g-AnsiYellow { color: #b26818 }
-.m-console .go { color: #b2b2b2 }
-.m-console .gp { color: #54ffff; font-weight: bold }
-.m-console .w { color: #b2b2b2 }
+.m-console .g-AnsiBrightYellow { color: #fdbc4b; font-weight: bold }
+.m-console .g-AnsiCyan { color: #1abc9c }
+.m-console .g-AnsiDefault { color: #fcfcfc }
+.m-console .g-AnsiGreen { color: #11d116 }
+.m-console .g-AnsiMagenta { color: #9b59b6 }
+.m-console .g-AnsiRed { color: #ed1515 }
+.m-console .g-AnsiWhite { color: #fcfcfc }
+.m-console .g-AnsiYellow { color: #f67400 }
+.m-console .go { color: #fcfcfc }
+.m-console .gp { color: #16a085; font-weight: bold }
+.m-console .w { color: #fcfcfc }

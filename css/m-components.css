@@ -1,7 +1,7 @@
 /*
     This file is part of m.css.
 
-    Copyright © 2017, 2018, 2019 Vladimír Vondruš <mosra@centrum.cz>
+    Copyright © 2017, 2018, 2019, 2020 Vladimír Vondruš <mosra@centrum.cz>
 
     Permission is hereby granted, free of charge, to any person obtaining a
     copy of this software and associated documentation files (the "Software"),
@@ -112,6 +112,9 @@ mark {
   padding: 0.0625rem;
   background-color: var(--mark-background-color);
   color: var(--mark-color);
+}
+.m-link-wrap {
+  word-break: break-all;
 }
 
 /* Block/inline code */
@@ -638,6 +641,9 @@ figure.m-figure figcaption, .m-code-figure figcaption, .m-console-figure figcapt
   font-weight: var(--heading-font-weight);
   font-size: 1.17rem; /* taken from webkit defaults for h3 */
 }
+figure.m-figure figcaption a, .m-code-figure figcaption a, .m-console-figure figcaption a {
+  text-decoration: var(--link-decoration-heading);
+}
 
 /* Image grid */
 .m-imagegrid > div {
@@ -1030,7 +1036,7 @@ figure.m-figure:not(.m-flat) > svg.m-graph:first-child {
   color: var(--dim-link-active-color);
 }
 .m-block.m-flat { border-color: transparent; }
-.m-block.m-flat h3, .m-block.m-flat h4, .m-block.m-flat h5. .m-block.m-flat h6 {
+.m-block.m-flat h3, .m-block.m-flat h4, .m-block.m-flat h5, .m-block.m-flat h6 {
   color: var(--default-color);
 }
 

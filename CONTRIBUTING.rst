@@ -37,7 +37,7 @@ Code contribution
         /*
             This file is part of m.css.
 
-            Copyright © 2017, 2018, 2019 Vladimír Vondruš <mosra@centrum.cz>
+            Copyright © 2017, 2018, 2019, 2020 Vladimír Vondruš <mosra@centrum.cz>
             Copyright © YEAR YOUR_NAME <your@mail.com>
 
             Permission is hereby granted, free of charge, to any person obtaining a
@@ -88,7 +88,7 @@ There are no visual tests for the CSS style at the moment. Running the tests:
 
     cd documentation
     python -m unittest
-    node test_doxygen/test-search.js
+    node test/test-search.js
 
 Code coverage needs `coverage.py <https://coverage.readthedocs.io/>`_ for
 Python (use ``pip`` or your system package) and
